@@ -8,6 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import Settings
 from app.errors import AppError, register_error_handlers
+from app.orchestrator.routes import router as sdlc_router
 from app.shortener.db import enable_wal, get_engine, make_session_factory
 from app.shortener.models import Base
 from app.shortener.rate_limit import SlidingWindowLimiter
@@ -67,6 +68,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise AppError(503, "not_ready", "database unavailable") from exc
         return {"status": "ready"}
 
+    app.include_router(sdlc_router)
     app.include_router(shortener_router)
     return app
 
