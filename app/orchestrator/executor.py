@@ -162,7 +162,12 @@ def _finalize(run: RunState) -> None:
     if NodeStatus.ROLLED_BACK in statuses:
         run.status = RunStatus.ROLLED_BACK
         return
-    if NodeStatus.FAILED in statuses or NodeStatus.PENDING in statuses:
+    # A failed optional node with a fallback applied is a degradation, not a failure.
+    blocking_failure = any(
+        node.status == NodeStatus.FAILED and not node.fallback_applied
+        for node in run.nodes.values()
+    )
+    if blocking_failure or NodeStatus.PENDING in statuses:
         run.status = RunStatus.FAILED
         return
     run.status = RunStatus.SUCCEEDED
@@ -227,6 +232,20 @@ async def advance(runs_dir: str, run: RunState) -> RunState:
                 node.finished_at = None
                 node.error = None
                 retried = True
+            elif node.spec.optional:
+                # Fallback: an optional gate degrades the run rather than failing it.
+                node.fallback_applied = True
+                run.fallback_count += 1
+                _audit(
+                    runs_dir,
+                    run,
+                    node.spec.id,
+                    NodeStatus.FAILED.value,
+                    NodeStatus.FAILED.value,
+                    "system",
+                    "fallback_applied: optional stage degraded, run continues",
+                    extra={"stage": node.spec.stage},
+                )
             elif node.spec.stage == "implement":
                 restore_artifacts(runs_dir, run.id)
                 _set_status(run, node, NodeStatus.ROLLED_BACK)

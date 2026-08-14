@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from app.errors import AppError
 from app.orchestrator.executor import advance
 from app.orchestrator.models import (
+    AuditEvent,
     Autonomy,
     NodeState,
     NodeStatus,
@@ -18,9 +19,16 @@ from app.orchestrator.models import (
 )
 from app.orchestrator.planner import plan, replan
 from app.orchestrator.schemas import ApproveRequest, CreateRunRequest
-from app.orchestrator.store import load_run, read_audit, save_run
+from app.orchestrator.store import append_audit, load_run, read_audit, save_run
 
 router = APIRouter(prefix="/sdlc", tags=["sdlc"])
+
+TERMINAL_STATUSES = {
+    RunStatus.SUCCEEDED,
+    RunStatus.FAILED,
+    RunStatus.ROLLED_BACK,
+    RunStatus.STOPPED,
+}
 
 
 class MetricsResponse(BaseModel):
@@ -46,7 +54,12 @@ def get_runs_dir(request: Request) -> str:
     return request.app.state.settings.runs_dir  # type: ignore[no-any-return]
 
 
+def get_default_test_target(request: Request) -> str:
+    return request.app.state.settings.domain_test_target  # type: ignore[no-any-return]
+
+
 RunsDir = Annotated[str, Depends(get_runs_dir)]
+DefaultTestTarget = Annotated[str, Depends(get_default_test_target)]
 
 
 def _decision_hash(decision: dict[str, object]) -> str:
@@ -55,7 +68,11 @@ def _decision_hash(decision: dict[str, object]) -> str:
 
 
 @router.post("/runs", summary="Create and execute an SDLC run until blocked")
-async def create_run(body: CreateRunRequest, runs_dir: RunsDir) -> RunState:
+async def create_run(
+    body: CreateRunRequest,
+    runs_dir: RunsDir,
+    default_test_target: DefaultTestTarget,
+) -> RunState:
     try:
         specs = plan(body.scenario.value, body.requirement)
     except ValueError as exc:
@@ -69,6 +86,7 @@ async def create_run(body: CreateRunRequest, runs_dir: RunsDir) -> RunState:
         auto_approve=body.auto_approve,
         inject_failure_node=body.inject_failure_node,
         inject_failure_remaining=body.inject_failure_count if body.inject_failure_node else 0,
+        domain_test_target=body.domain_test_target or default_test_target,
         created_at=now,
         updated_at=now,
     )
@@ -148,6 +166,36 @@ async def reject_run(run_id: str, body: ApproveRequest, runs_dir: RunsDir) -> Ru
     run.status = RunStatus.FAILED
     save_run(runs_dir, run)
     return run
+
+
+@router.post("/runs/{run_id}/resume", summary="Resume a run interrupted mid-stage")
+async def resume_run(run_id: str, runs_dir: RunsDir) -> RunState:
+    run = load_run(runs_dir, run_id)
+    if run.status in TERMINAL_STATUSES:
+        raise AppError(409, "run_terminal", f"Run is {run.status.value} and cannot be resumed")
+    reset: list[str] = []
+    for node in run.nodes.values():
+        if node.status == NodeStatus.RUNNING:
+            node.status = NodeStatus.PENDING
+            node.finished_at = None
+            reset.append(node.spec.id)
+    if reset:
+        append_audit(
+            runs_dir,
+            run.id,
+            AuditEvent(
+                ts=utcnow(),
+                from_status=NodeStatus.RUNNING.value,
+                to_status=NodeStatus.PENDING.value,
+                actor="system",
+                message="resume reset interrupted node(s)",
+                extra={"nodes": ",".join(reset)},
+            ),
+        )
+    run.stop_requested = False
+    run.status = RunStatus.RUNNING
+    save_run(runs_dir, run)
+    return await advance(runs_dir, run)
 
 
 @router.post("/runs/{run_id}/stop", summary="Cooperative safe-stop")

@@ -7,8 +7,16 @@ def test_greenfield_parallel_join() -> None:
     assert "impact_analysis" not in nodes
     assert nodes["test"].requires == ["implement_shorten"]
     assert nodes["security_review"].requires == ["implement_shorten"]
-    assert set(nodes["document"].requires) == {"test", "security_review"}
+    assert set(nodes["document"].requires) == {"test", "security_review", "static_analysis"}
     assert nodes["release_readiness"].autonomy == Autonomy.HUMAN_REQUIRED
+
+
+def test_static_analysis_is_an_optional_gate() -> None:
+    nodes = {n.id: n for n in plan("greenfield", "Build a URL shortener")}
+    assert nodes["static_analysis"].optional is True
+    assert nodes["static_analysis"].requires == ["implement_shorten"]
+    assert nodes["test"].optional is False
+    assert nodes["security_review"].optional is False
 
 
 def test_brownfield_has_impact_analysis() -> None:
@@ -50,6 +58,7 @@ def test_implementation_fans_out_and_joins() -> None:
         assert nodes[node_id].requires == ["design"]
     assert sorted(nodes["test"].requires) == implement_ids
     assert sorted(nodes["security_review"].requires) == implement_ids
+    assert sorted(nodes["static_analysis"].requires) == implement_ids
 
 
 def test_capability_free_requirement_yields_generic_implement() -> None:

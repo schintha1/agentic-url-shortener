@@ -116,10 +116,19 @@ def plan(scenario: str, requirement: str) -> list[NodeSpec]:
                 requires=list(implementation_ids),
                 produces=["security_review.json"],
             ),
+            # Optional quality gate: findings degrade the run instead of blocking it.
+            NodeSpec(
+                id="static_analysis",
+                stage="static_analysis",
+                requires=list(implementation_ids),
+                produces=["static_analysis.json"],
+                optional=True,
+                max_retries=2,
+            ),
             NodeSpec(
                 id="document",
                 stage="document",
-                requires=["test", "security_review"],
+                requires=["test", "security_review", "static_analysis"],
                 produces=["document.md"],
             ),
             NodeSpec(

@@ -88,5 +88,6 @@ class RunState(BaseModel):
     updated_at: datetime
     retry_count: int = 0
     rollback_count: int = 0
+    fallback_count: int = 0
     first_failure_at: datetime | None = None
     recovered_at: datetime | None = None

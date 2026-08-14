@@ -11,3 +11,4 @@ class Settings(BaseSettings):
     base_url: str = "http://localhost:8000"
     rate_limit_per_minute: int = 30
     allow_private_targets: bool = True
+    domain_test_target: str = "tests/test_shortener.py"
