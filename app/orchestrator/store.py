@@ -58,3 +58,24 @@ def read_audit(runs_dir: str, run_id: str) -> list[AuditEvent]:
         if line.strip():
             events.append(AuditEvent.model_validate(json.loads(line)))
     return events
+
+
+def snapshot_artifacts(runs_dir: str, run_id: str) -> None:
+    import shutil
+
+    source = artifacts_dir(runs_dir, run_id)
+    dest = run_dir(runs_dir, run_id) / "snapshot"
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(source, dest)
+
+
+def restore_artifacts(runs_dir: str, run_id: str) -> None:
+    import shutil
+
+    dest = artifacts_dir(runs_dir, run_id)
+    source = run_dir(runs_dir, run_id) / "snapshot"
+    if not source.exists():
+        return
+    shutil.rmtree(dest)
+    shutil.copytree(source, dest)
