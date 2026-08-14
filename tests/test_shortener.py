@@ -90,3 +90,42 @@ def test_stats_after_redirect(client: TestClient) -> None:
 def test_stats_unknown_code(client: TestClient) -> None:
     response = client.get("/v1/urls/missing/stats")
     assert response.status_code == 404
+
+
+def test_idempotency_replay(client: TestClient) -> None:
+    headers = {"Idempotency-Key": "abc-123"}
+    payload = {"url": "https://example.com/idem"}
+    first = client.post("/v1/shorten", json=payload, headers=headers)
+    second = client.post("/v1/shorten", json=payload, headers=headers)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["code"] == second.json()["code"]
+
+
+def test_idempotency_conflict(client: TestClient) -> None:
+    headers = {"Idempotency-Key": "same-key"}
+    client.post("/v1/shorten", json={"url": "https://example.com/one"}, headers=headers)
+    conflict = client.post(
+        "/v1/shorten", json={"url": "https://example.com/two"}, headers=headers
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "idempotency_conflict"
+
+
+def test_rate_limit(tmp_path) -> None:
+    from app.config import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'rl.db'}",
+        runs_dir=str(tmp_path / "runs"),
+        rate_limit_per_minute=2,
+        allow_private_targets=True,
+    )
+    with TestClient(create_app(settings)) as limited:
+        assert limited.post("/v1/shorten", json={"url": "https://example.com/a"}).status_code == 200
+        assert limited.post("/v1/shorten", json={"url": "https://example.com/b"}).status_code == 200
+        blocked = limited.post("/v1/shorten", json={"url": "https://example.com/c"})
+        assert blocked.status_code == 429
+        assert blocked.json()["error"]["code"] == "rate_limited"
+        assert "Retry-After" in blocked.headers

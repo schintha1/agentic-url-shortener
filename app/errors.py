@@ -15,10 +15,17 @@ class ErrorResponse(BaseModel):
 class AppError(Exception):
     """Application error mapped to a structured HTTP response."""
 
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.headers = headers or {}
 
 
 def register_error_handlers(app: FastAPI) -> None:
@@ -29,4 +36,5 @@ def register_error_handlers(app: FastAPI) -> None:
             content=ErrorResponse(
                 error=ErrorBody(code=exc.code, message=exc.message)
             ).model_dump(),
+            headers=exc.headers,
         )

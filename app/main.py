@@ -10,6 +10,7 @@ from app.config import Settings
 from app.errors import AppError, register_error_handlers
 from app.shortener.db import enable_wal, get_engine, make_session_factory
 from app.shortener.models import Base
+from app.shortener.rate_limit import SlidingWindowLimiter
 from app.shortener.routes import router as shortener_router
 
 
@@ -34,6 +35,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.engine = None
             app.state.session_factory = None
         app.state.settings = settings
+        app.state.limiter = SlidingWindowLimiter(settings.rate_limit_per_minute)
         yield
         engine = getattr(app.state, "engine", None)
         if engine is not None:

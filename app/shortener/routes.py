@@ -1,11 +1,12 @@
 from collections.abc import Iterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.errors import AppError
 from app.shortener import service
 from app.shortener.schemas import ShortenRequest, ShortenResponse, StatsResponse, UrlMetadata
 
@@ -27,14 +28,32 @@ def get_session(request: Request) -> Iterator[Session]:
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 SessionDep = Annotated[Session, Depends(get_session)]
+IdempotencyHeader = Annotated[str | None, Header(alias="Idempotency-Key")]
 
 
 @router.post("/v1/shorten", response_model=ShortenResponse, summary="Create a short URL")
 def shorten(
+    request: Request,
     body: ShortenRequest,
     settings: SettingsDep,
     session: SessionDep,
+    idempotency_key: IdempotencyHeader = None,
 ) -> ShortenResponse:
+    limiter = request.app.state.limiter
+    client_ip = request.client.host if request.client else "unknown"
+    if not limiter.allow(client_ip):
+        raise AppError(
+            429,
+            "rate_limited",
+            "Too many requests",
+            headers={"Retry-After": str(limiter.window_seconds)},
+        )
+    payload = body.model_dump(mode="json")
+    body_hash = service.hash_body(payload)
+    if idempotency_key:
+        cached = service.lookup_idempotency(session, idempotency_key, body_hash)
+        if cached is not None:
+            return ShortenResponse.model_validate_json(cached)
     record = service.create_short_url(
         session,
         original_url=str(body.url),
@@ -43,12 +62,15 @@ def shorten(
         custom_alias=body.custom_alias,
         ttl_seconds=body.ttl_seconds,
     )
-    return ShortenResponse(
+    response = ShortenResponse(
         code=record.code,
         short_url=service.short_url_for(settings.base_url, record.code),
         original_url=record.original_url,
         expires_at=record.expires_at,
     )
+    if idempotency_key:
+        service.store_idempotency(session, idempotency_key, body_hash, response.model_dump_json())
+    return response
 
 
 @router.get("/v1/urls/{code}", response_model=UrlMetadata, summary="Get short URL metadata")

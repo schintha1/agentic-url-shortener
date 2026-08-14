@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 
@@ -7,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError
 from app.shortener.codes import generate_code
-from app.shortener.models import Click, Url
+from app.shortener.models import Click, IdempotencyRecord, Url
 from app.shortener.validation import assert_safe_url
 
 MAX_COLLISION_RETRIES = 5
@@ -139,3 +141,35 @@ def get_stats(session: Session, code: str) -> dict[str, object]:
         "top_referrers": [{"value": row[0], "count": row[1]} for row in top_referrers],
         "top_user_agents": [{"value": row[0], "count": row[1]} for row in top_uas],
     }
+
+
+def hash_body(payload: dict[str, object]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def lookup_idempotency(session: Session, key: str, body_hash: str) -> str | None:
+    record = session.get(IdempotencyRecord, key)
+    if record is None:
+        return None
+    if record.body_hash != body_hash:
+        raise AppError(409, "idempotency_conflict", "Idempotency-Key reused with a different body")
+    return record.response_json
+
+
+def store_idempotency(session: Session, key: str, body_hash: str, response_json: str) -> None:
+    session.add(
+        IdempotencyRecord(
+            key=key[:128],
+            body_hash=body_hash,
+            response_json=response_json[:4096],
+            created_at=utcnow(),
+        )
+    )
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        existing = lookup_idempotency(session, key, body_hash)
+        if existing is None:
+            raise AppError(409, "idempotency_conflict", "Idempotency-Key conflict") from exc

@@ -24,3 +24,4 @@ curl -s -X POST http://localhost:8000/v1/shorten \
 - S2: SQLite Url model, Base62, URL allowlist
 - S3: shorten and redirect
 - S4: click stats API
+- S5: rate limit and Idempotency-Key
