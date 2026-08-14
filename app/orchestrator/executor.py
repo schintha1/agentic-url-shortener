@@ -13,7 +13,11 @@ from app.orchestrator.models import (
     RunStatus,
     utcnow,
 )
-from app.orchestrator.policy import check_artifacts
+from app.orchestrator.policy import (
+    check_artifacts,
+    check_release_compliance,
+    requires_change_control,
+)
 from app.orchestrator.store import (
     append_audit,
     artifacts_dir,
@@ -110,6 +114,15 @@ def _run_stage_sync(runs_dir: str, run: RunState, node: NodeState) -> None:
         run.inject_failure_remaining -= 1
         raise RuntimeError("injected failure")
     ctx = StageContext(node, run, runs_dir)
+    if node.spec.stage == "release_readiness":
+        # Compliance pack: the release gate needs its evidence on disk.
+        missing = check_release_compliance(ctx.directory)
+        if missing:
+            raise AppError(
+                422,
+                "compliance_violation",
+                f"Release evidence missing: {', '.join(missing)}",
+            )
     run_stage(ctx)
     # Exit gate: declared artifacts must exist, validate, and pass policy.
     validate_declared(ctx.directory, node.spec.produces)
@@ -151,6 +164,32 @@ async def _execute_ready(runs_dir: str, run: RunState, ready: list[NodeState]) -
     save_run(runs_dir, run)
 
 
+def _apply_change_control(runs_dir: str, run: RunState, ready: list[NodeState]) -> None:
+    """Withdraw self-approval when an upstream change is too high-impact.
+
+    `auto_approve` is an operator convenience; it must not let an agent release a
+    change to authentication, data retention, or a destructive endpoint.
+    """
+
+    for node in ready:
+        if node.spec.autonomy != Autonomy.HUMAN_REQUIRED or node.change_controlled:
+            continue
+        needed, reason = requires_change_control(artifacts_dir(runs_dir, run.id))
+        if not needed:
+            continue
+        node.change_controlled = True
+        _audit(
+            runs_dir,
+            run,
+            node.spec.id,
+            None,
+            None,
+            "system",
+            "change control withdrew auto-approval",
+            extra={"reason": reason},
+        )
+
+
 def _finalize(run: RunState) -> None:
     statuses = {n.status for n in run.nodes.values()}
     if run.stop_requested or NodeStatus.STOPPED in statuses:
@@ -189,10 +228,12 @@ async def advance(runs_dir: str, run: RunState) -> RunState:
             _finalize(run)
             save_run(runs_dir, run)
             return run
+        _apply_change_control(runs_dir, run, ready)
         gated = [
             node
             for node in ready
-            if node.spec.autonomy == Autonomy.HUMAN_REQUIRED and not run.auto_approve
+            if node.spec.autonomy == Autonomy.HUMAN_REQUIRED
+            and not (run.auto_approve and not node.change_controlled)
         ]
         if gated:
             for node in gated:

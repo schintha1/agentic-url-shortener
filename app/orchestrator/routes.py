@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from app.errors import AppError
+from app.orchestrator.auth import ApiKeyGuard
 from app.orchestrator.executor import advance
 from app.orchestrator.models import (
     AuditEvent,
@@ -19,9 +20,16 @@ from app.orchestrator.models import (
 )
 from app.orchestrator.planner import plan, replan
 from app.orchestrator.schemas import ApproveRequest, CreateRunRequest
-from app.orchestrator.store import append_audit, load_run, read_audit, save_run
+from app.orchestrator.store import (
+    append_audit,
+    list_run_ids,
+    load_run,
+    read_audit,
+    run_lock,
+    save_run,
+)
 
-router = APIRouter(prefix="/sdlc", tags=["sdlc"])
+router = APIRouter(prefix="/sdlc", tags=["sdlc"], dependencies=[ApiKeyGuard])
 
 TERMINAL_STATUSES = {
     RunStatus.SUCCEEDED,
@@ -118,53 +126,55 @@ def get_trace(run_id: str, runs_dir: RunsDir) -> list[TraceEvent]:
 
 @router.post("/runs/{run_id}/approve", summary="Approve a gate_wait node")
 async def approve_run(run_id: str, body: ApproveRequest, runs_dir: RunsDir) -> RunState:
-    run = load_run(runs_dir, run_id)
-    node = run.nodes.get(body.node_id)
-    if node is None or node.status != NodeStatus.GATE_WAIT:
-        raise AppError(409, "not_waiting", "Node is not waiting for approval")
-    from app.orchestrator.models import AuditEvent
-    from app.orchestrator.store import append_audit
-
-    append_audit(
-        runs_dir,
-        run.id,
-        AuditEvent(
-            ts=utcnow(),
-            node_id=node.spec.id,
-            from_status=NodeStatus.GATE_WAIT.value,
-            to_status=NodeStatus.PENDING.value,
-            actor="human",
-            message=body.note or "approved",
-            extra={"decision_hash": _decision_hash(body.decision)},
-        ),
-    )
-    if body.decision:
-        run.assumptions = {k: str(v) for k, v in body.decision.items()}
-    if run.scenario.value == "ambiguous" and node.spec.stage == "understand":
-        specs = replan(run, body.decision)
-        for spec in specs:
-            existing = run.nodes.get(spec.id)
-            if existing is None:
-                run.nodes[spec.id] = NodeState(spec=spec)
-            else:
-                existing.spec = spec
-    node.spec = node.spec.model_copy(update={"autonomy": Autonomy.AUTO})
-    node.status = NodeStatus.PENDING
-    run.status = RunStatus.RUNNING
-    save_run(runs_dir, run)
+    # The lock plus the version check in save_run make concurrent approvals safe:
+    # one wins, the other gets a clean 409 instead of silently overwriting it.
+    with run_lock(runs_dir, run_id):
+        run = load_run(runs_dir, run_id)
+        node = run.nodes.get(body.node_id)
+        if node is None or node.status != NodeStatus.GATE_WAIT:
+            raise AppError(409, "not_waiting", "Node is not waiting for approval")
+        append_audit(
+            runs_dir,
+            run.id,
+            AuditEvent(
+                ts=utcnow(),
+                node_id=node.spec.id,
+                from_status=NodeStatus.GATE_WAIT.value,
+                to_status=NodeStatus.PENDING.value,
+                actor="human",
+                message=body.note or "approved",
+                extra={"decision_hash": _decision_hash(body.decision)},
+            ),
+        )
+        if body.decision:
+            run.assumptions = {k: str(v) for k, v in body.decision.items()}
+        if run.scenario.value == "ambiguous" and node.spec.stage == "understand":
+            specs = replan(run, body.decision)
+            for spec in specs:
+                existing = run.nodes.get(spec.id)
+                if existing is None:
+                    run.nodes[spec.id] = NodeState(spec=spec)
+                else:
+                    existing.spec = spec
+        node.spec = node.spec.model_copy(update={"autonomy": Autonomy.AUTO})
+        node.change_controlled = False
+        node.status = NodeStatus.PENDING
+        run.status = RunStatus.RUNNING
+        save_run(runs_dir, run)
     return await advance(runs_dir, run)
 
 
 @router.post("/runs/{run_id}/reject", summary="Reject a gate_wait node")
 async def reject_run(run_id: str, body: ApproveRequest, runs_dir: RunsDir) -> RunState:
-    run = load_run(runs_dir, run_id)
-    node = run.nodes.get(body.node_id)
-    if node is None or node.status != NodeStatus.GATE_WAIT:
-        raise AppError(409, "not_waiting", "Node is not waiting for approval")
-    node.status = NodeStatus.FAILED
-    node.error = body.note or "rejected"
-    run.status = RunStatus.FAILED
-    save_run(runs_dir, run)
+    with run_lock(runs_dir, run_id):
+        run = load_run(runs_dir, run_id)
+        node = run.nodes.get(body.node_id)
+        if node is None or node.status != NodeStatus.GATE_WAIT:
+            raise AppError(409, "not_waiting", "Node is not waiting for approval")
+        node.status = NodeStatus.FAILED
+        node.error = body.note or "rejected"
+        run.status = RunStatus.FAILED
+        save_run(runs_dir, run)
     return run
 
 
@@ -208,14 +218,7 @@ async def stop_run(run_id: str, runs_dir: RunsDir) -> RunState:
 
 @router.get("/metrics", summary="Reliability metrics across runs")
 def get_metrics(runs_dir: RunsDir) -> MetricsResponse:
-    from pathlib import Path
-
-    runs: list[RunState] = []
-    root = Path(runs_dir)
-    if root.exists():
-        for child in root.iterdir():
-            if (child / "run.json").exists():
-                runs.append(load_run(runs_dir, child.name))
+    runs: list[RunState] = [load_run(runs_dir, run_id) for run_id in list_run_ids(runs_dir)]
     total = len(runs)
     successes = [item for item in runs if item.status == RunStatus.SUCCEEDED]
     retries = sum(item.retry_count for item in runs)

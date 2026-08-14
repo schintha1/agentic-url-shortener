@@ -48,6 +48,7 @@ class NodeState(BaseModel):
     status: NodeStatus = NodeStatus.PENDING
     attempts: int = 0
     fallback_applied: bool = False
+    change_controlled: bool = False
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
@@ -78,6 +79,7 @@ class RunState(BaseModel):
     requirement: str
     status: RunStatus = RunStatus.RUNNING
     nodes: dict[str, NodeState]
+    version: int = 0
     auto_approve: bool = False
     inject_failure_node: str | None = None
     inject_failure_remaining: int = 0

@@ -1,6 +1,10 @@
+import fcntl
 import json
 import os
 import re
+import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from app.errors import AppError
@@ -25,10 +29,46 @@ def artifacts_dir(runs_dir: str, run_id: str) -> Path:
     return path
 
 
-def save_run(runs_dir: str, run: RunState) -> None:
+@contextmanager
+def run_lock(runs_dir: str, run_id: str) -> Iterator[None]:
+    """Serialise read-modify-write cycles on one run across threads and processes."""
+
+    directory = run_dir(runs_dir, run_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / ".lock"
+    with lock_path.open("w", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _on_disk_version(directory: Path) -> int | None:
+    path = directory / "run.json"
+    if not path.exists():
+        return None
+    try:
+        return int(json.loads(path.read_text(encoding="utf-8")).get("version", 0))
+    except (ValueError, OSError):
+        return None
+
+
+def save_run(runs_dir: str, run: RunState, check_version: bool = True) -> None:
+    """Persist a run atomically, refusing a write that would clobber a newer one."""
+
     directory = run_dir(runs_dir, run.id)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "artifacts").mkdir(exist_ok=True)
+    if check_version:
+        current = _on_disk_version(directory)
+        if current is not None and current != run.version:
+            raise AppError(
+                409,
+                "run_conflict",
+                "Run was modified by another writer; reload and retry",
+            )
+    run.version += 1
     target = directory / "run.json"
     tmp = directory / "run.json.tmp"
     tmp.write_text(run.model_dump_json(indent=2), encoding="utf-8")
@@ -61,8 +101,6 @@ def read_audit(runs_dir: str, run_id: str) -> list[AuditEvent]:
 
 
 def snapshot_artifacts(runs_dir: str, run_id: str) -> None:
-    import shutil
-
     source = artifacts_dir(runs_dir, run_id)
     dest = run_dir(runs_dir, run_id) / "snapshot"
     if dest.exists():
@@ -71,11 +109,20 @@ def snapshot_artifacts(runs_dir: str, run_id: str) -> None:
 
 
 def restore_artifacts(runs_dir: str, run_id: str) -> None:
-    import shutil
-
     dest = artifacts_dir(runs_dir, run_id)
     source = run_dir(runs_dir, run_id) / "snapshot"
     if not source.exists():
         return
     shutil.rmtree(dest)
     shutil.copytree(source, dest)
+
+
+def list_run_ids(runs_dir: str) -> list[str]:
+    root = Path(runs_dir)
+    if not root.exists():
+        return []
+    return sorted(
+        child.name
+        for child in root.iterdir()
+        if child.is_dir() and (child / "run.json").exists() and RUN_ID_RE.match(child.name)
+    )

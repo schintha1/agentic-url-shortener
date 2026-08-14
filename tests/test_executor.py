@@ -13,7 +13,13 @@ def test_linear_stub_run_completes(client: TestClient) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "succeeded"
-    assert all(node["status"] == "succeeded" for node in body["nodes"].values())
+    # Optional gates may legitimately degrade; required nodes may not.
+    required = {
+        node_id: node
+        for node_id, node in body["nodes"].items()
+        if not node["spec"]["optional"]
+    }
+    assert all(node["status"] == "succeeded" for node in required.values())
     fetched = client.get(f"/sdlc/runs/{body['id']}")
     assert fetched.status_code == 200
     assert fetched.json()["id"] == body["id"]

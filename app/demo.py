@@ -23,6 +23,8 @@ def run_demo(runs_dir: str, database_url: str) -> dict[str, object]:
     settings = Settings(runs_dir=runs_dir, database_url=database_url, allow_private_targets=True)
     results: dict[str, object] = {}
     with TestClient(create_app(settings)) as client:
+        if settings.sdlc_api_key:
+            client.headers["X-API-Key"] = settings.sdlc_api_key
         for name in ("greenfield", "brownfield"):
             pack = load_pack(name)
             response = client.post(

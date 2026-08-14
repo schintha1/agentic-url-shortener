@@ -12,3 +12,6 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 30
     allow_private_targets: bool = True
     domain_test_target: str = "tests/test_shortener.py"
+    # When set, every /sdlc route requires this key in X-API-Key. Unset means the
+    # control plane is open, which is acceptable only for a local demo.
+    sdlc_api_key: str = ""
