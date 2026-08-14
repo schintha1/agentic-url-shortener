@@ -6,3 +6,4 @@ Production-style prototype: an agentic SDLC orchestrator plus a URL shortener do
 
 - S0: Python project + private GitHub remote
 - S1: GET /health and /ready
+- S2: SQLite Url model, Base62, URL allowlist
