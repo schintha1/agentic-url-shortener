@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 from app.errors import AppError
 from app.orchestrator.auth import ApiKeyGuard
 from app.orchestrator.executor import advance
+from app.orchestrator.invalidation import invalidate_stale
+from app.orchestrator.metrics import Metrics, current
 from app.orchestrator.models import (
     AuditEvent,
     Autonomy,
@@ -19,10 +21,10 @@ from app.orchestrator.models import (
     utcnow,
 )
 from app.orchestrator.planner import plan, replan
-from app.orchestrator.schemas import ApproveRequest, CreateRunRequest
+from app.orchestrator.schemas import AmendRequest, ApproveRequest, CreateRunRequest
 from app.orchestrator.store import (
     append_audit,
-    list_run_ids,
+    artifacts_dir,
     load_run,
     read_audit,
     run_lock,
@@ -37,15 +39,6 @@ TERMINAL_STATUSES = {
     RunStatus.ROLLED_BACK,
     RunStatus.STOPPED,
 }
-
-
-class MetricsResponse(BaseModel):
-    runs_total: int
-    success_rate: float
-    retry_count: int
-    rollback_count: int
-    e2e_latency_ms_avg: float
-    mttr_ms: float
 
 
 class TraceEvent(BaseModel):
@@ -178,6 +171,82 @@ async def reject_run(run_id: str, body: ApproveRequest, runs_dir: RunsDir) -> Ru
     return run
 
 
+@router.post("/runs/{run_id}/amend", summary="Revise the requirement and re-plan")
+async def amend_run(run_id: str, body: AmendRequest, runs_dir: RunsDir) -> RunState:
+    """Fold a revised requirement into a live run.
+
+    New work is added, obsolete nodes are dropped, and any node whose inputs
+    changed is invalidated along with everything downstream. Prior audit events
+    are preserved so the decision history survives the re-plan.
+    """
+
+    with run_lock(runs_dir, run_id):
+        run = load_run(runs_dir, run_id)
+        previous = run.requirement
+        if previous.strip() == body.requirement.strip():
+            raise AppError(409, "requirement_unchanged", "Amended requirement is identical")
+
+        run.requirement = body.requirement
+        try:
+            specs = plan(run.scenario.value, body.requirement)
+        except ValueError as exc:
+            raise AppError(422, "invalid_scenario", str(exc)) from exc
+
+        planned = {spec.id: spec for spec in specs}
+        # Keep human-gated additions (for example apply_assumptions) that the
+        # planner does not regenerate.
+        preserved = {
+            node_id
+            for node_id, node in run.nodes.items()
+            if node_id not in planned and node.spec.stage == "apply_assumptions"
+        }
+        added = [node_id for node_id in planned if node_id not in run.nodes]
+        removed = [
+            node_id
+            for node_id in list(run.nodes)
+            if node_id not in planned and node_id not in preserved
+        ]
+
+        for node_id in removed:
+            del run.nodes[node_id]
+        for node_id, spec in planned.items():
+            existing = run.nodes.get(node_id)
+            if existing is None:
+                run.nodes[node_id] = NodeState(spec=spec)
+            elif node_id in preserved:
+                continue
+            else:
+                merged = spec
+                if "apply_assumptions" in run.nodes and node_id == "decompose":
+                    merged = spec.model_copy(
+                        update={"requires": [*spec.requires, "apply_assumptions"]}
+                    )
+                existing.spec = merged
+
+        artifacts = artifacts_dir(runs_dir, run.id)
+        invalidated = invalidate_stale(run, artifacts)
+
+        append_audit(
+            runs_dir,
+            run.id,
+            AuditEvent(
+                ts=utcnow(),
+                actor="human",
+                message="requirement amended",
+                extra={
+                    "note": body.note,
+                    "previous_requirement_hash": _decision_hash({"r": previous}),
+                    "added": ",".join(sorted(added)),
+                    "removed": ",".join(sorted(removed)),
+                    "invalidated": ",".join(invalidated),
+                },
+            ),
+        )
+        run.status = RunStatus.RUNNING
+        save_run(runs_dir, run)
+    return await advance(runs_dir, run)
+
+
 @router.post("/runs/{run_id}/resume", summary="Resume a run interrupted mid-stage")
 async def resume_run(run_id: str, runs_dir: RunsDir) -> RunState:
     run = load_run(runs_dir, run_id)
@@ -217,25 +286,5 @@ async def stop_run(run_id: str, runs_dir: RunsDir) -> RunState:
 
 
 @router.get("/metrics", summary="Reliability metrics across runs")
-def get_metrics(runs_dir: RunsDir) -> MetricsResponse:
-    runs: list[RunState] = [load_run(runs_dir, run_id) for run_id in list_run_ids(runs_dir)]
-    total = len(runs)
-    successes = [item for item in runs if item.status == RunStatus.SUCCEEDED]
-    retries = sum(item.retry_count for item in runs)
-    rollbacks = sum(item.rollback_count for item in runs)
-    latencies = [
-        (item.updated_at - item.created_at).total_seconds() * 1000 for item in runs
-    ]
-    mttrs = [
-        (item.recovered_at - item.first_failure_at).total_seconds() * 1000
-        for item in runs
-        if item.first_failure_at and item.recovered_at
-    ]
-    return MetricsResponse(
-        runs_total=total,
-        success_rate=(len(successes) / total) if total else 0.0,
-        retry_count=retries,
-        rollback_count=rollbacks,
-        e2e_latency_ms_avg=(sum(latencies) / len(latencies)) if latencies else 0.0,
-        mttr_ms=(sum(mttrs) / len(mttrs)) if mttrs else 0.0,
-    )
+def get_metrics(runs_dir: RunsDir, recompute: bool = False) -> Metrics:
+    return current(runs_dir, recompute=recompute)

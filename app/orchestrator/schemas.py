@@ -16,3 +16,8 @@ class ApproveRequest(BaseModel):
     node_id: str
     decision: dict[str, object] = Field(default_factory=dict)
     note: str = ""
+
+
+class AmendRequest(BaseModel):
+    requirement: str = Field(..., min_length=1, max_length=8000)
+    note: str = Field(default="", max_length=500)

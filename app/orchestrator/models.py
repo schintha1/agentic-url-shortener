@@ -52,6 +52,8 @@ class NodeState(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
+    # Hash of the inputs this node consumed. A change here invalidates the node.
+    input_hash: str | None = None
 
 
 class AuditEvent(BaseModel):

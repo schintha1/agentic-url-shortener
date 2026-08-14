@@ -4,6 +4,8 @@ from app.errors import AppError
 from app.orchestrator.agents import run_stage
 from app.orchestrator.artifacts import validate_declared
 from app.orchestrator.context import StageContext
+from app.orchestrator.invalidation import compute_input_hash
+from app.orchestrator.metrics import refresh as refresh_metrics
 from app.orchestrator.models import (
     AuditEvent,
     Autonomy,
@@ -114,6 +116,8 @@ def _run_stage_sync(runs_dir: str, run: RunState, node: NodeState) -> None:
         run.inject_failure_remaining -= 1
         raise RuntimeError("injected failure")
     ctx = StageContext(node, run, runs_dir)
+    # Record what this node consumed so a later change can invalidate it.
+    node.input_hash = compute_input_hash(run, node, ctx.directory)
     if node.spec.stage == "release_readiness":
         # Compliance pack: the release gate needs its evidence on disk.
         missing = check_release_compliance(ctx.directory)
@@ -212,9 +216,25 @@ def _finalize(run: RunState) -> None:
     run.status = RunStatus.SUCCEEDED
 
 
+TERMINAL_RUN_STATUSES = {
+    RunStatus.SUCCEEDED,
+    RunStatus.FAILED,
+    RunStatus.ROLLED_BACK,
+    RunStatus.STOPPED,
+}
+
+
 async def advance(runs_dir: str, run: RunState) -> RunState:
     """Execute ready nodes until blocked (HITL) or the run is terminal."""
 
+    result = await _advance_loop(runs_dir, run)
+    if result.status in TERMINAL_RUN_STATUSES:
+        # Keep the rollup honest without rescanning every run on every read.
+        refresh_metrics(runs_dir)
+    return result
+
+
+async def _advance_loop(runs_dir: str, run: RunState) -> RunState:
     while run.status == RunStatus.RUNNING:
         if run.stop_requested:
             for node in run.nodes.values():
