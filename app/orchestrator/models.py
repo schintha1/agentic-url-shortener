@@ -3,6 +3,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from app.orchestrator.requirements import Capability
+
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
@@ -38,6 +40,7 @@ class NodeSpec(BaseModel):
     autonomy: Autonomy = Autonomy.AUTO
     optional: bool = False
     max_retries: int = 2
+    capability: Capability | None = None
 
 
 class NodeState(BaseModel):
@@ -79,6 +82,7 @@ class RunState(BaseModel):
     inject_failure_node: str | None = None
     inject_failure_remaining: int = 0
     stop_requested: bool = False
+    domain_test_target: str = "tests/test_shortener.py"
     created_at: datetime
     updated_at: datetime
     retry_count: int = 0

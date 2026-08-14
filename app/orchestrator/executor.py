@@ -107,7 +107,7 @@ def _run_stage_sync(runs_dir: str, run: RunState, node: NodeState) -> None:
     if run.inject_failure_node == node.spec.id and run.inject_failure_remaining > 0:
         run.inject_failure_remaining -= 1
         raise RuntimeError("injected failure")
-    run_stage(node.spec.stage, run, runs_dir)
+    run_stage(node, run, runs_dir)
     check_artifacts(artifacts_dir(runs_dir, run.id))
 
 
