@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -91,6 +91,12 @@ def get_metadata(
 def get_stats(code: str, session: SessionDep) -> StatsResponse:
     payload = service.get_stats(session, code)
     return StatsResponse.model_validate(payload)
+
+
+@router.delete("/v1/urls/{code}", status_code=204, summary="Delete a short URL and its clicks")
+def delete_url(code: str, session: SessionDep) -> Response:
+    service.delete_url(session, code)
+    return Response(status_code=204)
 
 
 @router.get("/{code}", summary="Redirect a short code")

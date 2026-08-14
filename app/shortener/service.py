@@ -3,14 +3,14 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.errors import AppError
 from app.shortener.codes import generate_code
 from app.shortener.models import Click, IdempotencyRecord, Url
-from app.shortener.validation import assert_safe_url
+from app.shortener.validation import assert_alias_available, assert_safe_url
 
 MAX_COLLISION_RETRIES = 5
 HEADER_MAX = 512
@@ -42,6 +42,7 @@ def create_short_url(
     assert_safe_url(original_url, allow_private=allow_private)
     expires_at = utcnow() + timedelta(seconds=ttl_seconds) if ttl_seconds else None
     if custom_alias:
+        assert_alias_available(custom_alias)
         record = Url(
             code=custom_alias,
             original_url=original_url,
@@ -141,6 +142,29 @@ def get_stats(session: Session, code: str) -> dict[str, object]:
         "top_referrers": [{"value": row[0], "count": row[1]} for row in top_referrers],
         "top_user_agents": [{"value": row[0], "count": row[1]} for row in top_uas],
     }
+
+
+def delete_url(session: Session, code: str) -> None:
+    """Delete a short URL and its click history."""
+
+    record = session.get(Url, code)
+    if record is None:
+        raise AppError(404, "not_found", "Short URL not found")
+    # Explicit child delete: SQLite does not enforce ON DELETE CASCADE by default.
+    session.execute(delete(Click).where(Click.url_code == code))
+    session.delete(record)
+    session.commit()
+
+
+def purge_clicks_older_than(session: Session, days: int) -> int:
+    """Delete click records past the retention window. Returns rows removed."""
+
+    if days <= 0:
+        return 0
+    cutoff = utcnow() - timedelta(days=days)
+    result = session.execute(delete(Click).where(Click.accessed_at < cutoff))
+    session.commit()
+    return int(result.rowcount or 0)
 
 
 def hash_body(payload: dict[str, object]) -> str:

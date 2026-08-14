@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import Settings
 from app.errors import AppError, register_error_handlers
+from app.logging_config import configure_logging, request_id_middleware
 from app.orchestrator.routes import router as sdlc_router
 from app.shortener.db import enable_wal, get_engine, make_session_factory
 from app.shortener.models import Base
@@ -43,13 +45,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if engine is not None:
             engine.dispose()
 
+    configure_logging(getattr(logging, settings.log_level.upper(), logging.INFO))
+
     app = FastAPI(
         title="Agentic URL Shortener",
-        version="0.1.0",
+        version="0.2.0",
         description="URL shortener domain service with an agentic SDLC orchestrator.",
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.middleware("http")(request_id_middleware)
     register_error_handlers(app)
 
     @app.get("/health", summary="Liveness probe")

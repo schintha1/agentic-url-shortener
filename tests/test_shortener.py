@@ -112,6 +112,106 @@ def test_idempotency_conflict(client: TestClient) -> None:
     assert conflict.json()["error"]["code"] == "idempotency_conflict"
 
 
+def test_reserved_alias_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/v1/shorten", json={"url": "https://example.com", "custom_alias": "docs"}
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "alias_reserved"
+    # The real route must still be reachable, which is why the alias is refused.
+    assert client.get("/docs").status_code == 200
+
+
+def test_reserved_alias_check_is_case_insensitive(client: TestClient) -> None:
+    response = client.post(
+        "/v1/shorten", json={"url": "https://example.com", "custom_alias": "HEALTH"}
+    )
+    assert response.status_code == 409
+
+
+def test_delete_removes_url_and_clicks(client: TestClient) -> None:
+    created = client.post("/v1/shorten", json={"url": "https://example.com/gone"})
+    code = created.json()["code"]
+    client.get(f"/{code}", follow_redirects=False, headers={"User-Agent": "pytest"})
+    assert client.get(f"/v1/urls/{code}/stats").json()["clicks"] == 1
+
+    deleted = client.delete(f"/v1/urls/{code}")
+    assert deleted.status_code == 204
+    assert client.get(f"/{code}", follow_redirects=False).status_code == 404
+
+    from app.shortener.models import Click
+
+    factory = client.app.state.session_factory
+    session = factory()
+    try:
+        remaining = session.query(Click).filter(Click.url_code == code).count()
+    finally:
+        session.close()
+    assert remaining == 0, "click rows must be removed with their parent"
+
+
+def test_delete_unknown_code(client: TestClient) -> None:
+    assert client.delete("/v1/urls/missing").status_code == 404
+
+
+def test_retention_purge_keeps_recent_clicks(client: TestClient) -> None:
+    from app.shortener import service
+    from app.shortener.models import Click
+
+    created = client.post("/v1/shorten", json={"url": "https://example.com/retain"})
+    code = created.json()["code"]
+    factory = client.app.state.session_factory
+    session = factory()
+    try:
+        session.add(
+            Click(
+                url_code=code,
+                referrer=None,
+                user_agent="old",
+                accessed_at=datetime.now(UTC) - timedelta(days=90),
+            )
+        )
+        session.add(
+            Click(
+                url_code=code,
+                referrer=None,
+                user_agent="recent",
+                accessed_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+        removed = service.purge_clicks_older_than(session, days=30)
+        assert removed == 1
+        survivors = [c.user_agent for c in session.query(Click).all()]
+    finally:
+        session.close()
+    assert survivors == ["recent"]
+
+
+def test_retention_purge_is_a_noop_when_disabled(client: TestClient) -> None:
+    from app.shortener import service
+
+    factory = client.app.state.session_factory
+    session = factory()
+    try:
+        assert service.purge_clicks_older_than(session, days=0) == 0
+    finally:
+        session.close()
+
+
+def test_limiter_evicts_idle_keys() -> None:
+    from app.shortener.rate_limit import SlidingWindowLimiter
+
+    limiter = SlidingWindowLimiter(limit=5, window_seconds=60, max_keys=10)
+    for index in range(200):
+        limiter.allow(f"10.0.0.{index}")
+    assert limiter.tracked_keys() <= 10, "limiter map must stay bounded"
+    # An active client is still limited correctly after eviction pressure.
+    for _ in range(5):
+        assert limiter.allow("192.168.1.1") is True
+    assert limiter.allow("192.168.1.1") is False
+
+
 def test_rate_limit(tmp_path) -> None:
     from app.config import Settings
     from app.main import create_app

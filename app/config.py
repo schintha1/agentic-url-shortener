@@ -15,3 +15,5 @@ class Settings(BaseSettings):
     # When set, every /sdlc route requires this key in X-API-Key. Unset means the
     # control plane is open, which is acceptable only for a local demo.
     sdlc_api_key: str = ""
+    click_retention_days: int = 30
+    log_level: str = "INFO"
