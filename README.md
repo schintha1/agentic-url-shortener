@@ -57,6 +57,8 @@ python -m app.demo
 
 ## Architecture
 
+Full design rationale, alternatives considered, and known gaps: [Technical design document](docs/DESIGN.md).
+
 One FastAPI process, port 8000. Shortener routes live under `/v1` and `GET /{code}`. Orchestrator routes live under `/sdlc`.
 
 ```mermaid
