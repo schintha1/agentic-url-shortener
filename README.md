@@ -29,3 +29,7 @@ curl -s -X POST http://localhost:8000/v1/shorten \
 - S7: DAG planner for three scenario types
 - S8: create and execute SDLC runs
 - S9: parallel test and security_review join
+- S10: policy gates on artifacts
+- S11: human approval on release
+- S12: retry, rollback, safe-stop
+- S13: trace and metrics APIs
