@@ -25,3 +25,4 @@ curl -s -X POST http://localhost:8000/v1/shorten \
 - S3: shorten and redirect
 - S4: click stats API
 - S5: rate limit and Idempotency-Key
+- S6: run store on disk

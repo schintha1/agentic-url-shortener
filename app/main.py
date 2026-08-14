@@ -23,6 +23,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         runs_path.mkdir(parents=True, exist_ok=True)
+        app.state.runs_dir = str(runs_path)
         if settings.database_url.startswith("sqlite") and ":memory:" not in settings.database_url:
             Path("data").mkdir(parents=True, exist_ok=True)
         try:
