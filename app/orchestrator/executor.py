@@ -1,4 +1,7 @@
+import asyncio
+
 from app.errors import AppError
+from app.orchestrator.agents import run_stage
 from app.orchestrator.models import (
     AuditEvent,
     Autonomy,
@@ -10,7 +13,7 @@ from app.orchestrator.models import (
 )
 from app.orchestrator.store import append_audit, save_run
 
-PARALLEL = False
+STAGE_ERRORS = (RuntimeError, OSError, ValueError, AppError)
 
 
 def _ready(run: RunState) -> list[NodeState]:
@@ -63,36 +66,24 @@ def _set_status(run: RunState, node: NodeState, status: NodeStatus) -> None:
     run.updated_at = utcnow()
 
 
-async def _execute_node(runs_dir: str, run: RunState, node: NodeState) -> None:
-    from app.orchestrator.agents import run_stage
+def _fail_node(runs_dir: str, run: RunState, node: NodeState, exc: BaseException) -> None:
+    node.error = str(exc)
+    if run.first_failure_at is None:
+        run.first_failure_at = utcnow()
+    _set_status(run, node, NodeStatus.FAILED)
+    _audit(
+        runs_dir,
+        run,
+        node.spec.id,
+        NodeStatus.RUNNING.value,
+        NodeStatus.FAILED.value,
+        "system",
+        "node failed",
+        extra={"error_type": type(exc).__name__},
+    )
 
-    node.started_at = utcnow()
-    node.attempts += 1
-    _set_status(run, node, NodeStatus.RUNNING)
-    _audit(runs_dir, run, node.spec.id, NodeStatus.PENDING.value, NodeStatus.RUNNING.value, "agent", "node started")
-    save_run(runs_dir, run)
-    try:
-        if run.inject_failure_node == node.spec.id and run.inject_failure_remaining > 0:
-            run.inject_failure_remaining -= 1
-            raise RuntimeError("injected failure")
-        run_stage(node.spec.stage, run, runs_dir)
-    except (RuntimeError, OSError, ValueError, AppError) as exc:
-        node.error = str(exc)
-        if run.first_failure_at is None:
-            run.first_failure_at = utcnow()
-        _set_status(run, node, NodeStatus.FAILED)
-        _audit(
-            runs_dir,
-            run,
-            node.spec.id,
-            NodeStatus.RUNNING.value,
-            NodeStatus.FAILED.value,
-            "system",
-            "node failed",
-            extra={"error_type": type(exc).__name__},
-        )
-        save_run(runs_dir, run)
-        return
+
+def _succeed_node(runs_dir: str, run: RunState, node: NodeState) -> None:
     _set_status(run, node, NodeStatus.SUCCEEDED)
     _audit(
         runs_dir,
@@ -103,6 +94,47 @@ async def _execute_node(runs_dir: str, run: RunState, node: NodeState) -> None:
         "agent",
         "node succeeded",
     )
+
+
+def _run_stage_sync(runs_dir: str, run: RunState, node: NodeState) -> None:
+    if run.inject_failure_node == node.spec.id and run.inject_failure_remaining > 0:
+        run.inject_failure_remaining -= 1
+        raise RuntimeError("injected failure")
+    run_stage(node.spec.stage, run, runs_dir)
+
+
+async def _execute_ready(runs_dir: str, run: RunState, ready: list[NodeState]) -> None:
+    for node in ready:
+        node.started_at = utcnow()
+        node.attempts += 1
+        _set_status(run, node, NodeStatus.RUNNING)
+        _audit(
+            runs_dir,
+            run,
+            node.spec.id,
+            NodeStatus.PENDING.value,
+            NodeStatus.RUNNING.value,
+            "agent",
+            "node started",
+        )
+    save_run(runs_dir, run)
+
+    async def work(node: NodeState) -> tuple[NodeState, BaseException | None]:
+        try:
+            await asyncio.to_thread(_run_stage_sync, runs_dir, run, node)
+            return node, None
+        except STAGE_ERRORS as exc:
+            return node, exc
+
+    results = await asyncio.gather(*[work(node) for node in ready], return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            continue
+        node, exc = result
+        if exc is None:
+            _succeed_node(runs_dir, run, node)
+        else:
+            _fail_node(runs_dir, run, node, exc)
     save_run(runs_dir, run)
 
 
@@ -159,18 +191,6 @@ async def advance(runs_dir: str, run: RunState) -> RunState:
             run.status = RunStatus.GATE_WAIT
             save_run(runs_dir, run)
             return run
-        if PARALLEL:
-            import asyncio
-
-            results = await asyncio.gather(
-                *[_execute_node(runs_dir, run, node) for node in ready],
-                return_exceptions=True,
-            )
-            for node, result in zip(ready, results, strict=True):
-                if isinstance(result, Exception):
-                    node.error = str(result)
-                    _set_status(run, node, NodeStatus.FAILED)
-        else:
-            await _execute_node(runs_dir, run, ready[0])
+        await _execute_ready(runs_dir, run, ready)
     save_run(runs_dir, run)
     return run

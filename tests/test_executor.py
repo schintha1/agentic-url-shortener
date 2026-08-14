@@ -31,3 +31,17 @@ def test_requirement_too_long(client: TestClient) -> None:
         json={"scenario": "greenfield", "requirement": "x" * 8001, "auto_approve": True},
     )
     assert response.status_code == 422
+
+
+def test_parallel_join_order(client: TestClient) -> None:
+    response = client.post(
+        "/sdlc/runs",
+        json={"scenario": "greenfield", "requirement": "Build APIs", "auto_approve": True},
+    )
+    nodes = response.json()["nodes"]
+    test_done = nodes["test"]["finished_at"]
+    sec_done = nodes["security_review"]["finished_at"]
+    doc_start = nodes["document"]["started_at"]
+    assert test_done is not None and sec_done is not None and doc_start is not None
+    assert doc_start >= test_done
+    assert doc_start >= sec_done

@@ -28,3 +28,4 @@ curl -s -X POST http://localhost:8000/v1/shorten \
 - S6: run store on disk
 - S7: DAG planner for three scenario types
 - S8: create and execute SDLC runs
+- S9: parallel test and security_review join
