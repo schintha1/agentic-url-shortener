@@ -3,28 +3,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import Settings
 from app.errors import AppError, register_error_handlers
-
-
-def _sqlite_connect_args(url: str) -> dict[str, bool]:
-    if url.startswith("sqlite"):
-        return {"check_same_thread": False}
-    return {}
-
-
-def check_database(database_url: str) -> None:
-    engine = create_engine(database_url, connect_args=_sqlite_connect_args(database_url))
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-    except SQLAlchemyError as exc:
-        raise AppError(503, "not_ready", "database unavailable") from exc
-    finally:
-        engine.dispose()
+from app.shortener.db import enable_wal, get_engine, make_session_factory
+from app.shortener.models import Base
+from app.shortener.routes import router as shortener_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -32,15 +18,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     settings = settings or Settings()
     runs_path = Path(settings.runs_dir)
-    data_dir = Path("data")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         runs_path.mkdir(parents=True, exist_ok=True)
-        if settings.database_url.startswith("sqlite") and "memory" not in settings.database_url:
-            data_dir.mkdir(parents=True, exist_ok=True)
+        if settings.database_url.startswith("sqlite") and ":memory:" not in settings.database_url:
+            Path("data").mkdir(parents=True, exist_ok=True)
+        try:
+            engine = get_engine(settings.database_url)
+            Base.metadata.create_all(engine)
+            enable_wal(engine)
+            app.state.engine = engine
+            app.state.session_factory = make_session_factory(engine)
+        except (SQLAlchemyError, OSError):
+            app.state.engine = None
+            app.state.session_factory = None
         app.state.settings = settings
         yield
+        engine = getattr(app.state, "engine", None)
+        if engine is not None:
+            engine.dispose()
 
     app = FastAPI(
         title="Agentic URL Shortener",
@@ -57,9 +54,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/ready", summary="Readiness probe")
     def ready() -> dict[str, str]:
-        check_database(settings.database_url)
+        engine = getattr(app.state, "engine", None)
+        if engine is None:
+            raise AppError(503, "not_ready", "database unavailable")
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        except SQLAlchemyError as exc:
+            raise AppError(503, "not_ready", "database unavailable") from exc
         return {"status": "ready"}
 
+    app.include_router(shortener_router)
     return app
 
 

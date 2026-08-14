@@ -10,14 +10,18 @@ def get_engine(url: str) -> Engine:
     if url.startswith("sqlite"):
         connect_args = {"check_same_thread": False}
         if ":memory:" in url:
-            engine = create_engine(url, connect_args=connect_args, poolclass=StaticPool)
-        else:
-            engine = create_engine(url, connect_args=connect_args)
-            with engine.connect() as conn:
-                conn.exec_driver_sql("PRAGMA journal_mode=WAL")
-                conn.commit()
-        return engine
+            return create_engine(url, connect_args=connect_args, poolclass=StaticPool)
+        return create_engine(url, connect_args=connect_args)
     return create_engine(url)
+
+
+def enable_wal(engine: Engine) -> None:
+    database = engine.url.database
+    if engine.url.get_backend_name() != "sqlite" or not database or database == ":memory:":
+        return
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+        conn.commit()
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
