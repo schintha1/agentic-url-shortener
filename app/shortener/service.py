@@ -1,14 +1,18 @@
+import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import desc, func, select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.errors import AppError
 from app.shortener.codes import generate_code
-from app.shortener.models import Url
+from app.shortener.models import Click, Url
 from app.shortener.validation import assert_safe_url
 
 MAX_COLLISION_RETRIES = 5
+HEADER_MAX = 512
+logger = logging.getLogger(__name__)
 
 
 def utcnow() -> datetime:
@@ -82,3 +86,56 @@ def get_url(session: Session, code: str) -> Url:
 
 def short_url_for(base_url: str, code: str) -> str:
     return f"{base_url.rstrip('/')}/{code}"
+
+
+def _truncate(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value[:HEADER_MAX]
+
+
+def record_click(session: Session, code: str, referrer: str | None, user_agent: str | None) -> None:
+    try:
+        session.add(
+            Click(
+                url_code=code,
+                referrer=_truncate(referrer),
+                user_agent=_truncate(user_agent),
+                accessed_at=utcnow(),
+            )
+        )
+        session.commit()
+    except SQLAlchemyError:
+        session.rollback()
+        logger.exception("click_record_failed", extra={"code": code})
+
+
+def get_stats(session: Session, code: str) -> dict[str, object]:
+    get_url(session, code)
+    click_count = session.scalar(
+        select(func.count()).select_from(Click).where(Click.url_code == code)
+    )
+    last_access = session.scalar(
+        select(func.max(Click.accessed_at)).where(Click.url_code == code)
+    )
+    top_referrers = session.execute(
+        select(Click.referrer, func.count().label("count"))
+        .where(Click.url_code == code, Click.referrer.is_not(None))
+        .group_by(Click.referrer)
+        .order_by(desc("count"))
+        .limit(5)
+    ).all()
+    top_uas = session.execute(
+        select(Click.user_agent, func.count().label("count"))
+        .where(Click.url_code == code, Click.user_agent.is_not(None))
+        .group_by(Click.user_agent)
+        .order_by(desc("count"))
+        .limit(5)
+    ).all()
+    return {
+        "code": code,
+        "clicks": int(click_count or 0),
+        "last_access": last_access,
+        "top_referrers": [{"value": row[0], "count": row[1]} for row in top_referrers],
+        "top_user_agents": [{"value": row[0], "count": row[1]} for row in top_uas],
+    }

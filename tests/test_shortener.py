@@ -68,3 +68,25 @@ def test_expired_url_410(client: TestClient) -> None:
     response = client.get("/expired", follow_redirects=False)
     assert response.status_code == 410
     assert response.json()["error"]["code"] == "expired"
+
+
+def test_stats_after_redirect(client: TestClient) -> None:
+    created = client.post("/v1/shorten", json={"url": "https://example.com/stats"})
+    code = created.json()["code"]
+    client.get(
+        f"/{code}",
+        follow_redirects=False,
+        headers={"Referer": "https://news.example.com", "User-Agent": "pytest"},
+    )
+    stats = client.get(f"/v1/urls/{code}/stats")
+    assert stats.status_code == 200
+    body = stats.json()
+    assert body["clicks"] == 1
+    assert body["last_access"] is not None
+    assert body["top_referrers"][0]["value"] == "https://news.example.com"
+    assert body["top_user_agents"][0]["value"] == "pytest"
+
+
+def test_stats_unknown_code(client: TestClient) -> None:
+    response = client.get("/v1/urls/missing/stats")
+    assert response.status_code == 404

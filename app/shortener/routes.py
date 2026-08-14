@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.shortener import service
-from app.shortener.schemas import ShortenRequest, ShortenResponse, UrlMetadata
+from app.shortener.schemas import ShortenRequest, ShortenResponse, StatsResponse, UrlMetadata
 
 router = APIRouter()
 
@@ -65,7 +65,19 @@ def get_metadata(
     )
 
 
+@router.get("/v1/urls/{code}/stats", response_model=StatsResponse, summary="Click analytics")
+def get_stats(code: str, session: SessionDep) -> StatsResponse:
+    payload = service.get_stats(session, code)
+    return StatsResponse.model_validate(payload)
+
+
 @router.get("/{code}", summary="Redirect a short code")
-def redirect(code: str, session: SessionDep) -> RedirectResponse:
+def redirect(request: Request, code: str, session: SessionDep) -> RedirectResponse:
     record = service.get_url(session, code)
+    service.record_click(
+        session,
+        record.code,
+        referrer=request.headers.get("referer"),
+        user_agent=request.headers.get("user-agent"),
+    )
     return RedirectResponse(url=record.original_url, status_code=302)

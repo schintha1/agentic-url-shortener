@@ -26,3 +26,16 @@ class UrlMetadata(BaseModel):
     original_url: str
     created_at: datetime
     expires_at: datetime | None = None
+
+
+class CountBucket(BaseModel):
+    value: str | None
+    count: int
+
+
+class StatsResponse(BaseModel):
+    code: str
+    clicks: int
+    last_access: datetime | None = None
+    top_referrers: list[CountBucket]
+    top_user_agents: list[CountBucket]
