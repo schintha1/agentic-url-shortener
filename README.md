@@ -5,3 +5,4 @@ Production-style prototype: an agentic SDLC orchestrator plus a URL shortener do
 ## Build log
 
 - S0: Python project + private GitHub remote
+- S1: GET /health and /ready
