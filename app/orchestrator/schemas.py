@@ -8,6 +8,7 @@ class CreateRunRequest(BaseModel):
     requirement: str = Field(..., min_length=1, max_length=8000)
     auto_approve: bool = False
     inject_failure_node: str | None = None
+    inject_failure_count: int = Field(default=1, ge=1, le=10)
 
 
 class ApproveRequest(BaseModel):
