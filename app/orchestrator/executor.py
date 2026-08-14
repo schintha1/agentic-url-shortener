@@ -2,6 +2,8 @@ import asyncio
 
 from app.errors import AppError
 from app.orchestrator.agents import run_stage
+from app.orchestrator.artifacts import validate_declared
+from app.orchestrator.context import StageContext
 from app.orchestrator.models import (
     AuditEvent,
     Autonomy,
@@ -107,8 +109,11 @@ def _run_stage_sync(runs_dir: str, run: RunState, node: NodeState) -> None:
     if run.inject_failure_node == node.spec.id and run.inject_failure_remaining > 0:
         run.inject_failure_remaining -= 1
         raise RuntimeError("injected failure")
-    run_stage(node, run, runs_dir)
-    check_artifacts(artifacts_dir(runs_dir, run.id))
+    ctx = StageContext(node, run, runs_dir)
+    run_stage(ctx)
+    # Exit gate: declared artifacts must exist, validate, and pass policy.
+    validate_declared(ctx.directory, node.spec.produces)
+    check_artifacts(artifacts_dir(runs_dir, run.id), only=node.spec.produces)
 
 
 async def _execute_ready(runs_dir: str, run: RunState, ready: list[NodeState]) -> None:

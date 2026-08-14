@@ -34,11 +34,9 @@ def test_requirement_too_long(client: TestClient) -> None:
 
 
 def test_policy_fails_run(client: TestClient, monkeypatch) -> None:
-    def bad_stage(stage: str, run, runs_dir: str) -> None:
-        from app.orchestrator.store import artifacts_dir
-
-        path = artifacts_dir(runs_dir, run.id) / f"{stage}.json"
-        path.write_text('{"secret": "sk-abcdefghijklmnop"}', encoding="utf-8")
+    def bad_stage(ctx) -> None:
+        for name in ctx.node.spec.produces:
+            ctx.write(name, '{"secret": "sk-abcdefghijklmnop"}')
 
     monkeypatch.setattr("app.orchestrator.executor.run_stage", bad_stage)
     response = client.post(
@@ -47,6 +45,38 @@ def test_policy_fails_run(client: TestClient, monkeypatch) -> None:
     )
     assert response.status_code == 200
     assert response.json()["status"] == "failed"
+
+
+def test_stage_writing_nothing_fails_the_gate(client: TestClient, monkeypatch) -> None:
+    """A node that produces no declared artifact must not pass its exit gate."""
+
+    def silent_stage(ctx) -> None:
+        return None
+
+    monkeypatch.setattr("app.orchestrator.executor.run_stage", silent_stage)
+    response = client.post(
+        "/sdlc/runs",
+        json={"scenario": "greenfield", "requirement": "Build APIs", "auto_approve": True},
+    )
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["nodes"]["understand"]["status"] == "failed"
+    assert "Declared artifact not produced" in body["nodes"]["understand"]["error"]
+
+
+def test_stage_writing_invalid_schema_fails_the_gate(client: TestClient, monkeypatch) -> None:
+    def malformed_stage(ctx) -> None:
+        for name in ctx.node.spec.produces:
+            ctx.write(name, '{"intent": 12345, "capabilities": "not-a-list"}')
+
+    monkeypatch.setattr("app.orchestrator.executor.run_stage", malformed_stage)
+    response = client.post(
+        "/sdlc/runs",
+        json={"scenario": "greenfield", "requirement": "Build APIs", "auto_approve": True},
+    )
+    body = response.json()
+    assert body["status"] == "failed"
+    assert "schema validation" in body["nodes"]["understand"]["error"]
 
 
 def test_requirement_shapes_the_executed_graph(client: TestClient) -> None:

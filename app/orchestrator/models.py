@@ -83,6 +83,7 @@ class RunState(BaseModel):
     inject_failure_remaining: int = 0
     stop_requested: bool = False
     domain_test_target: str = "tests/test_shortener.py"
+    assumptions: dict[str, str] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
     retry_count: int = 0

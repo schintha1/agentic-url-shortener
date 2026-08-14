@@ -120,6 +120,8 @@ async def approve_run(run_id: str, body: ApproveRequest, runs_dir: RunsDir) -> R
             extra={"decision_hash": _decision_hash(body.decision)},
         ),
     )
+    if body.decision:
+        run.assumptions = {k: str(v) for k, v in body.decision.items()}
     if run.scenario.value == "ambiguous" and node.spec.stage == "understand":
         specs = replan(run, body.decision)
         for spec in specs:

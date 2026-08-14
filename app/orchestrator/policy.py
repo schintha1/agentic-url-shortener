@@ -10,12 +10,16 @@ RULES: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
-def check_artifacts(directory: Path) -> None:
+def check_artifacts(directory: Path, only: list[str] | None = None) -> None:
     """Fail the node if artifact text matches a deny rule. Never echo secrets."""
 
     if not directory.exists():
         return
-    for path in directory.rglob("*"):
+    if only is not None:
+        candidates = [directory / name for name in only]
+    else:
+        candidates = list(directory.rglob("*"))
+    for path in candidates:
         if not path.is_file():
             continue
         try:
