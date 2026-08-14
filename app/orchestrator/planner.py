@@ -81,10 +81,29 @@ def plan(scenario: str, requirement: str) -> list[NodeSpec]:
 
 
 def replan(run: RunState, decision: dict[str, object]) -> list[NodeSpec]:
-    """Stub until S15; returns existing specs unchanged."""
+    """Add apply_assumptions when auth is requested; never drop existing nodes."""
 
-    _ = decision
-    return [state.spec for state in run.nodes.values()]
+    specs = [state.spec for state in run.nodes.values()]
+    auth = str(decision.get("auth", "api_key"))
+    if auth == "none" or any(spec.id == "apply_assumptions" for spec in specs):
+        return specs
+    extra = NodeSpec(
+        id="apply_assumptions",
+        stage="apply_assumptions",
+        requires=["understand"],
+        produces=["assumptions.json"],
+    )
+    updated: list[NodeSpec] = []
+    for spec in specs:
+        if spec.id == "decompose" and "apply_assumptions" not in spec.requires:
+            updated.append(
+                spec.model_copy(update={"requires": [*spec.requires, "apply_assumptions"]})
+            )
+        else:
+            updated.append(spec)
+    updated.append(extra)
+    _assert_acyclic(updated)
+    return updated
 
 
 def _assert_acyclic(nodes: list[NodeSpec]) -> None:

@@ -33,3 +33,5 @@ curl -s -X POST http://localhost:8000/v1/shorten \
 - S11: human approval on release
 - S12: retry, rollback, safe-stop
 - S13: trace and metrics APIs
+- S14: stage agents produce artifacts and run pytest
+- S15: three scenarios and dynamic re-plan

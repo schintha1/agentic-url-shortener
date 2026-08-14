@@ -1,0 +1,5 @@
+{
+  "name": "ambiguous",
+  "requirement": "Make it enterprise-ready",
+  "default_decision": {"auth": "api_key", "retention_days": 30}
+}

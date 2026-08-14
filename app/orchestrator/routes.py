@@ -123,8 +123,11 @@ async def approve_run(run_id: str, body: ApproveRequest, runs_dir: RunsDir) -> R
     if run.scenario.value == "ambiguous" and node.spec.stage == "understand":
         specs = replan(run, body.decision)
         for spec in specs:
-            if spec.id not in run.nodes:
+            existing = run.nodes.get(spec.id)
+            if existing is None:
                 run.nodes[spec.id] = NodeState(spec=spec)
+            else:
+                existing.spec = spec
     node.spec = node.spec.model_copy(update={"autonomy": Autonomy.AUTO})
     node.status = NodeStatus.PENDING
     run.status = RunStatus.RUNNING
