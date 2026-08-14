@@ -11,7 +11,14 @@ from app.orchestrator.models import (
     RunStatus,
     utcnow,
 )
-from app.orchestrator.store import append_audit, save_run
+from app.orchestrator.policy import check_artifacts
+from app.orchestrator.store import (
+    append_audit,
+    artifacts_dir,
+    restore_artifacts,
+    save_run,
+    snapshot_artifacts,
+)
 
 STAGE_ERRORS = (RuntimeError, OSError, ValueError, AppError)
 
@@ -101,6 +108,7 @@ def _run_stage_sync(runs_dir: str, run: RunState, node: NodeState) -> None:
         run.inject_failure_remaining -= 1
         raise RuntimeError("injected failure")
     run_stage(node.spec.stage, run, runs_dir)
+    check_artifacts(artifacts_dir(runs_dir, run.id))
 
 
 async def _execute_ready(runs_dir: str, run: RunState, ready: list[NodeState]) -> None:
@@ -140,11 +148,11 @@ async def _execute_ready(runs_dir: str, run: RunState, ready: list[NodeState]) -
 
 def _finalize(run: RunState) -> None:
     statuses = {n.status for n in run.nodes.values()}
-    if NodeStatus.GATE_WAIT in statuses:
-        run.status = RunStatus.GATE_WAIT
-        return
     if run.stop_requested or NodeStatus.STOPPED in statuses:
         run.status = RunStatus.STOPPED
+        return
+    if NodeStatus.GATE_WAIT in statuses:
+        run.status = RunStatus.GATE_WAIT
         return
     if NodeStatus.ROLLED_BACK in statuses:
         run.status = RunStatus.ROLLED_BACK
@@ -161,7 +169,7 @@ async def advance(runs_dir: str, run: RunState) -> RunState:
     while run.status == RunStatus.RUNNING:
         if run.stop_requested:
             for node in run.nodes.values():
-                if node.status == NodeStatus.PENDING:
+                if node.status in {NodeStatus.PENDING, NodeStatus.GATE_WAIT}:
                     _set_status(run, node, NodeStatus.STOPPED)
             _finalize(run)
             save_run(runs_dir, run)
@@ -191,6 +199,48 @@ async def advance(runs_dir: str, run: RunState) -> RunState:
             run.status = RunStatus.GATE_WAIT
             save_run(runs_dir, run)
             return run
+        if any(node.spec.stage == "implement" for node in ready):
+            snapshot_artifacts(runs_dir, run.id)
         await _execute_ready(runs_dir, run, ready)
+        retried = False
+        for node in ready:
+            if node.status != NodeStatus.FAILED:
+                continue
+            if node.attempts < node.spec.max_retries:
+                run.retry_count += 1
+                node.status = NodeStatus.RETRYING
+                _audit(
+                    runs_dir,
+                    run,
+                    node.spec.id,
+                    NodeStatus.FAILED.value,
+                    NodeStatus.RETRYING.value,
+                    "system",
+                    "retry scheduled",
+                )
+                node.status = NodeStatus.PENDING
+                node.finished_at = None
+                node.error = None
+                retried = True
+            elif node.spec.stage == "implement":
+                restore_artifacts(runs_dir, run.id)
+                _set_status(run, node, NodeStatus.ROLLED_BACK)
+                run.rollback_count += 1
+                _audit(
+                    runs_dir,
+                    run,
+                    node.spec.id,
+                    NodeStatus.FAILED.value,
+                    NodeStatus.ROLLED_BACK.value,
+                    "system",
+                    "implement rolled back",
+                )
+        if retried:
+            run.status = RunStatus.RUNNING
+            save_run(runs_dir, run)
+            await asyncio.sleep(0.01)
+            continue
+        if run.first_failure_at and any(n.status == NodeStatus.SUCCEEDED and n.attempts > 1 for n in ready):
+            run.recovered_at = utcnow()
     save_run(runs_dir, run)
     return run

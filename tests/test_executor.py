@@ -33,6 +33,22 @@ def test_requirement_too_long(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_policy_fails_run(client: TestClient, monkeypatch) -> None:
+    def bad_stage(stage: str, run, runs_dir: str) -> None:
+        from app.orchestrator.store import artifacts_dir
+
+        path = artifacts_dir(runs_dir, run.id) / f"{stage}.json"
+        path.write_text('{"secret": "sk-abcdefghijklmnop"}', encoding="utf-8")
+
+    monkeypatch.setattr("app.orchestrator.executor.run_stage", bad_stage)
+    response = client.post(
+        "/sdlc/runs",
+        json={"scenario": "greenfield", "requirement": "Build APIs", "auto_approve": True},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+
+
 def test_parallel_join_order(client: TestClient) -> None:
     response = client.post(
         "/sdlc/runs",
