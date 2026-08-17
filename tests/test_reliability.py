@@ -56,6 +56,24 @@ def test_stop_leaves_stopped(client: TestClient) -> None:
     assert any(node["status"] == "stopped" for node in stopped.json()["nodes"].values())
 
 
+def test_background_create_can_be_stopped(client: TestClient) -> None:
+    created = client.post(
+        "/sdlc/runs",
+        json={
+            "scenario": "greenfield",
+            "requirement": "Build APIs",
+            "auto_approve": False,
+            "background": True,
+        },
+    )
+    assert created.status_code == 200
+    body = created.json()
+    assert body["id"]
+    stopped = client.post(f"/sdlc/runs/{body['id']}/stop")
+    assert stopped.json()["status"] == "stopped"
+    assert any(node["status"] == "stopped" for node in stopped.json()["nodes"].values())
+
+
 def test_failing_domain_suite_fails_the_run(client: TestClient) -> None:
     """The headline reliability claim: a red domain suite must fail the run."""
 
@@ -148,14 +166,14 @@ def test_resume_recovers_an_interrupted_run(client: TestClient) -> None:
     run_path = Path(client.app.state.settings.runs_dir) / run_id / "run.json"
     document = json.loads(run_path.read_text(encoding="utf-8"))
     document["status"] = "running"
-    document["nodes"]["release_readiness"]["status"] = "running"
+    document["nodes"]["release_approve"]["status"] = "running"
     run_path.write_text(json.dumps(document), encoding="utf-8")
 
     resumed = client.post(f"/sdlc/runs/{run_id}/resume")
     assert resumed.status_code == 200
     body = resumed.json()
     assert body["status"] == "gate_wait"
-    assert body["nodes"]["release_readiness"]["status"] == "gate_wait"
+    assert body["nodes"]["release_approve"]["status"] == "gate_wait"
     trace = client.get(f"/sdlc/runs/{run_id}/trace").json()
     assert any("resume reset" in event["message"] for event in trace)
 
@@ -169,3 +187,35 @@ def test_resume_rejects_terminal_run(client: TestClient) -> None:
     response = client.post(f"/sdlc/runs/{run_id}/resume")
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "run_terminal"
+
+
+def test_implement_rollback_restores_workspace(client: TestClient) -> None:
+    response = client.post(
+        "/sdlc/runs",
+        json={
+            "scenario": "greenfield",
+            "requirement": "Add CSV export of click analytics",
+            "auto_approve": True,
+            "inject_failure_node": "implement_export",
+            "inject_failure_count": 5,
+        },
+    )
+    body = response.json()
+    assert body["status"] == "rolled_back"
+    workspace = Path(client.app.state.settings.runs_dir) / body["id"] / "workspace"
+    routes = (workspace / "app" / "shortener" / "routes.py").read_text(encoding="utf-8")
+    assert "def export_clicks" not in routes
+
+
+def test_parent_path_test_target_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/sdlc/runs",
+        json={
+            "scenario": "greenfield",
+            "requirement": "Build APIs",
+            "auto_approve": True,
+            "domain_test_target": "../secret.py",
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_test_target"

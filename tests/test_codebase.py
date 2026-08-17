@@ -72,6 +72,35 @@ def test_scan_reflects_new_code(tmp_path: Path) -> None:
     assert after == ["GET /first", "POST /second"]
 
 
+def test_export_is_not_already_present_in_the_live_tree() -> None:
+    codebase = scan(REPO_ROOT)
+    report = codebase.impacted_by([Capability.EXPORT])
+    assert Capability.EXPORT in report.unmatched_capabilities
+
+
+def test_auth_is_not_already_present_in_the_shortener() -> None:
+    codebase = scan(REPO_ROOT)
+    report = codebase.impacted_by([Capability.AUTH])
+    assert Capability.AUTH in report.unmatched_capabilities
+    assert report.modules == []
+
+
+def test_retention_impact_stays_in_shortener() -> None:
+    codebase = scan(REPO_ROOT)
+    report = codebase.impacted_by([Capability.RETENTION])
+    assert Capability.RETENTION not in report.unmatched_capabilities
+    assert report.modules
+    assert all(path.startswith("app/shortener/") for path in report.modules)
+    assert all("orchestrator" not in path for path in report.modules)
+
+
+def test_impact_never_names_orchestrator_auth() -> None:
+    codebase = scan(REPO_ROOT)
+    report = codebase.impacted_by([Capability.AUTH, Capability.RATE_LIMIT])
+    assert "app/orchestrator/auth.py" not in report.modules
+    assert Capability.AUTH in report.unmatched_capabilities
+
+
 def test_missing_package_is_empty() -> None:
     codebase = scan("/tmp/definitely-not-a-repo-xyz")
     assert codebase.modules == {}

@@ -17,3 +17,4 @@ class Settings(BaseSettings):
     sdlc_api_key: str = ""
     click_retention_days: int = 30
     log_level: str = "INFO"
+    allow_failure_injection: bool = False

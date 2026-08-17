@@ -48,3 +48,20 @@ def test_risk_flags_for_sensitive_capabilities() -> None:
     analysis = analyze("Add API key auth and a retention purge job")
     assert any("security boundary" in flag for flag in analysis.risk_flags)
     assert any("change control" in flag for flag in analysis.risk_flags)
+
+
+def test_assumptions_fold_into_capabilities() -> None:
+    analysis = analyze(
+        "Make it enterprise-ready",
+        assumptions={"auth": "api_key", "retention_days": "30"},
+    )
+    assert Capability.AUTH in analysis.capabilities
+    assert Capability.RETENTION in analysis.capabilities
+    assert any("30 days" in item for item in analysis.acceptance_criteria)
+    assert not any("auth scheme" in item for item in analysis.ambiguities)
+
+
+def test_rate_threshold_in_requirement_is_not_asked_again() -> None:
+    analysis = analyze("Add rate limiting at 30 requests per minute")
+    assert Capability.RATE_LIMIT in analysis.capabilities
+    assert not any("rate limit threshold" in item for item in analysis.ambiguities)

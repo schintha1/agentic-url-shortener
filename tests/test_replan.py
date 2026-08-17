@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 
@@ -30,8 +32,9 @@ def test_amend_adds_work_and_invalidates_downstream(client: TestClient) -> None:
     assert "implement_caching" in body["nodes"]
     assert "implement_analytics" in body["nodes"]
 
-    # The run re-converged after invalidation rather than staying broken.
     assert body["status"] == "succeeded"
+    assert body["nodes"]["implement_analytics"]["status"] == "succeeded"
+    assert "implement_caching" in body["nodes"]
 
     # History survived the re-plan.
     trace_after = client.get(f"/sdlc/runs/{run_id}/trace").json()
@@ -62,6 +65,8 @@ def test_amend_drops_obsolete_work(client: TestClient) -> None:
     body = amended.json()
     assert "implement_caching" not in body["nodes"]
     assert "implement_analytics" in body["nodes"]
+    artifacts = Path(client.app.state.settings.runs_dir) / run_id / "artifacts"
+    assert not (artifacts / "implementation_caching.json").exists()
     trace = client.get(f"/sdlc/runs/{run_id}/trace").json()
     amend_event = next(e for e in trace if "amended" in e["message"])
     assert "implement_caching" in amend_event["extra"]["removed"]
@@ -93,18 +98,16 @@ def test_input_hash_is_recorded_and_changes_with_input() -> None:
         updated_at=utcnow(),
     )
     empty = Path("/tmp")
-    first = compute_input_hash(run, run.nodes["design"], empty)
+    first = compute_input_hash(run, run.nodes["understand"], empty)
     run.requirement = "Add caching and analytics"
-    second = compute_input_hash(run, run.nodes["design"], empty)
+    second = compute_input_hash(run, run.nodes["understand"], empty)
     assert first != second
 
 
-def test_invalidation_is_surgical() -> None:
-    """Only the changed node and its descendants reset; siblings are left alone."""
+def test_invalidation_is_surgical(tmp_path: Path) -> None:
+    """Sibling implement nodes stay succeeded; join stages reset."""
 
-    from pathlib import Path
-
-    from app.orchestrator.invalidation import descendants, invalidate_stale
+    from app.orchestrator.invalidation import apply_amend_invalidation, descendants
     from app.orchestrator.models import NodeState, NodeStatus, RunState, ScenarioType, utcnow
     from app.orchestrator.planner import plan
 
@@ -119,13 +122,16 @@ def test_invalidation_is_surgical() -> None:
     )
     for node in run.nodes.values():
         node.status = NodeStatus.SUCCEEDED
-        node.input_hash = "stale-hash-that-will-not-match"
+        node.input_hash = "kept"
 
     down = descendants(run, {"implement_caching"})
     assert "test" in down
     assert "document" in down
     assert "understand" not in down
+    assert "implement_analytics" not in down
 
-    reset = invalidate_stale(run, Path("/tmp"))
+    reset = apply_amend_invalidation(run, ["implement_caching"], {}, str(tmp_path))
     assert "document" in reset
     assert run.nodes["document"].status == NodeStatus.PENDING
+    assert run.nodes["implement_analytics"].status == NodeStatus.SUCCEEDED
+    assert run.nodes["implement_caching"].status == NodeStatus.PENDING

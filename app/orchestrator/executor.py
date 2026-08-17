@@ -3,7 +3,7 @@ import asyncio
 from app.errors import AppError
 from app.orchestrator.agents import run_stage
 from app.orchestrator.artifacts import validate_declared
-from app.orchestrator.context import StageContext
+from app.orchestrator.context import REPO_ROOT, StageContext
 from app.orchestrator.invalidation import compute_input_hash
 from app.orchestrator.metrics import refresh as refresh_metrics
 from app.orchestrator.models import (
@@ -26,9 +26,11 @@ from app.orchestrator.store import (
     restore_artifacts,
     save_run,
     snapshot_artifacts,
+    stop_was_requested,
 )
+from app.orchestrator.workspace import ensure_workspace
 
-STAGE_ERRORS = (RuntimeError, OSError, ValueError, AppError)
+STAGE_ERRORS = (Exception,)
 
 
 def _ready(run: RunState) -> list[NodeState]:
@@ -112,13 +114,11 @@ def _succeed_node(runs_dir: str, run: RunState, node: NodeState) -> None:
 
 
 def _run_stage_sync(runs_dir: str, run: RunState, node: NodeState) -> None:
-    if run.inject_failure_node == node.spec.id and run.inject_failure_remaining > 0:
-        run.inject_failure_remaining -= 1
-        raise RuntimeError("injected failure")
-    ctx = StageContext(node, run, runs_dir)
+    repo_root = ensure_workspace(runs_dir, run.id, REPO_ROOT)
+    ctx = StageContext(node, run, runs_dir, repo_root=repo_root)
     # Record what this node consumed so a later change can invalidate it.
     node.input_hash = compute_input_hash(run, node, ctx.directory)
-    if node.spec.stage == "release_readiness":
+    if node.spec.stage == "release_prepare":
         # Compliance pack: the release gate needs its evidence on disk.
         missing = check_release_compliance(ctx.directory)
         if missing:
@@ -131,6 +131,9 @@ def _run_stage_sync(runs_dir: str, run: RunState, node: NodeState) -> None:
     # Exit gate: declared artifacts must exist, validate, and pass policy.
     validate_declared(ctx.directory, node.spec.produces)
     check_artifacts(artifacts_dir(runs_dir, run.id), only=node.spec.produces)
+    if run.inject_failure_node == node.spec.id and run.inject_failure_remaining > 0:
+        run.inject_failure_remaining -= 1
+        raise RuntimeError("injected failure")
 
 
 async def _execute_ready(runs_dir: str, run: RunState, ready: list[NodeState]) -> None:
@@ -157,14 +160,15 @@ async def _execute_ready(runs_dir: str, run: RunState, ready: list[NodeState]) -
             return node, exc
 
     results = await asyncio.gather(*[work(node) for node in ready], return_exceptions=True)
-    for result in results:
+    for node, result in zip(ready, results, strict=True):
         if isinstance(result, BaseException):
+            _fail_node(runs_dir, run, node, result)
             continue
-        node, exc = result
+        finished, exc = result
         if exc is None:
-            _succeed_node(runs_dir, run, node)
+            _succeed_node(runs_dir, run, finished)
         else:
-            _fail_node(runs_dir, run, node, exc)
+            _fail_node(runs_dir, run, finished, exc)
     save_run(runs_dir, run)
 
 
@@ -234,15 +238,22 @@ async def advance(runs_dir: str, run: RunState) -> RunState:
     return result
 
 
+def _apply_stop(runs_dir: str, run: RunState) -> RunState:
+    run.stop_requested = True
+    for node in run.nodes.values():
+        if node.status in {NodeStatus.PENDING, NodeStatus.GATE_WAIT}:
+            _set_status(run, node, NodeStatus.STOPPED)
+    _finalize(run)
+    save_run(runs_dir, run)
+    return run
+
+
 async def _advance_loop(runs_dir: str, run: RunState) -> RunState:
+    if run.stop_requested or stop_was_requested(run.id):
+        return _apply_stop(runs_dir, run)
     while run.status == RunStatus.RUNNING:
-        if run.stop_requested:
-            for node in run.nodes.values():
-                if node.status in {NodeStatus.PENDING, NodeStatus.GATE_WAIT}:
-                    _set_status(run, node, NodeStatus.STOPPED)
-            _finalize(run)
-            save_run(runs_dir, run)
-            return run
+        if run.stop_requested or stop_was_requested(run.id):
+            return _apply_stop(runs_dir, run)
         ready = _ready(run)
         if not ready:
             _finalize(run)

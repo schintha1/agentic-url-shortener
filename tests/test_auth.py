@@ -61,3 +61,27 @@ def test_control_plane_is_open_when_unconfigured(client: TestClient) -> None:
     """The local demo path must keep working without a key."""
 
     assert client.get("/sdlc/metrics").status_code == 200
+
+
+def test_failure_injection_disabled_when_unconfigured(tmp_path) -> None:
+    from app.config import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'inj.db'}",
+        runs_dir=str(tmp_path / "runs"),
+        allow_private_targets=True,
+        allow_failure_injection=False,
+    )
+    with TestClient(create_app(settings)) as locked:
+        response = locked.post(
+            "/sdlc/runs",
+            json={
+                "scenario": "greenfield",
+                "requirement": "Build APIs",
+                "auto_approve": True,
+                "inject_failure_node": "test",
+            },
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "failure_injection_disabled"

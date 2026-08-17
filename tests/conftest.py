@@ -19,6 +19,7 @@ def settings(tmp_path: Path) -> Settings:
         base_url="http://testserver",
         allow_private_targets=True,
         rate_limit_per_minute=30,
+        allow_failure_injection=True,
     )
 
 

@@ -23,10 +23,17 @@ class RequirementBrief(BaseModel):
     risk_flags: list[str] = Field(default_factory=list)
 
 
+class TaskItem(BaseModel):
+    id: str
+    files: list[str] = Field(default_factory=list)
+    acceptance: str = ""
+
+
 class TaskDag(BaseModel):
     nodes: list[str]
     parallel_groups: list[list[str]] = Field(default_factory=list)
     rationale: str
+    tasks: list[TaskItem] = Field(default_factory=list)
 
 
 class ImplementationReport(BaseModel):
@@ -36,6 +43,30 @@ class ImplementationReport(BaseModel):
     mapping: dict[str, str] = Field(default_factory=dict)
     touches_public_api: bool = False
     notes: str = ""
+    changed_files: list[str] = Field(default_factory=list)
+    already_present: bool = False
+    patch_artifact: str = "change.patch"
+
+
+class SecurityFinding(BaseModel):
+    id: str
+    severity: str = "low"
+    blocking: bool = False
+    text: str
+
+
+class ScopeDecision(BaseModel):
+    run_id: str
+    decision: dict[str, str] = Field(default_factory=dict)
+    note: str = ""
+
+
+class ReleaseApproval(BaseModel):
+    run_id: str
+    node_id: str
+    note: str = ""
+    actor: str = "human"
+    waiver: str = ""
 
 
 class TestReport(BaseModel):
@@ -48,7 +79,7 @@ class TestReport(BaseModel):
 
 
 class SecurityReview(BaseModel):
-    findings: list[str] = Field(default_factory=list)
+    findings: list[SecurityFinding] = Field(default_factory=list)
     endpoints_reviewed: int = 0
 
 
@@ -64,7 +95,7 @@ class AssumptionRecord(BaseModel):
     applied: bool = True
 
 
-MARKDOWN_ARTIFACTS = {"design.md", "document.md", "release_checklist.md"}
+MARKDOWN_ARTIFACTS = {"design.md", "document.md", "release_checklist.md", "change.patch"}
 
 SCHEMAS: dict[str, type[BaseModel]] = {
     "requirement_brief.json": RequirementBrief,
@@ -74,6 +105,8 @@ SCHEMAS: dict[str, type[BaseModel]] = {
     "security_review.json": SecurityReview,
     "static_analysis.json": StaticAnalysisReport,
     "assumptions.json": AssumptionRecord,
+    "scope_decision.json": ScopeDecision,
+    "release_approval.json": ReleaseApproval,
 }
 
 _IMPLEMENTATION_RE = re.compile(r"^implementation(_[a-z_]+)?\.json$")

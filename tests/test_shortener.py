@@ -150,6 +150,22 @@ def test_delete_removes_url_and_clicks(client: TestClient) -> None:
     assert remaining == 0, "click rows must be removed with their parent"
 
 
+def test_idempotency_concurrent_same_key_returns_one_code(client: TestClient) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    headers = {"Idempotency-Key": "race-key"}
+    payload = {"url": "https://example.com/race"}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(client.post, "/v1/shorten", json=payload, headers=headers)
+            for _ in range(2)
+        ]
+        bodies = [future.result().json() for future in futures]
+    codes = {body["code"] for body in bodies if "code" in body}
+    assert len(codes) == 1
+
+
 def test_delete_unknown_code(client: TestClient) -> None:
     assert client.delete("/v1/urls/missing").status_code == 404
 

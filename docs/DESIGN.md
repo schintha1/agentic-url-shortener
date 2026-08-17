@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Implemented (prototype, tagged `v0.2.0`) |
+| Status | Implemented (prototype, tagged `v0.3.0`) |
 | Repository | `schintha1/agentic-url-shortener` |
 | Related | [README.md](../README.md) |
 | Scope | Whole system: orchestration layer and domain service |
@@ -30,7 +30,7 @@ The governing principle: **agents execute multi-step work under defined autonomy
 4. Enforce human approval on high-impact actions (release, ambiguous assumptions).
 5. Provide bounded retries, rollback, and cooperative safe-stop.
 6. Enforce policy guardrails on generated artifacts before a stage is allowed to pass.
-7. Emit audit-grade traces and reliability metrics (success rate, retries, rollbacks, end-to-end latency, MTTR).
+7. Emit append-oriented prototype traces and reliability metrics (success rate, retries, rollbacks, end-to-end latency, MTTR).
 8. Re-plan dynamically when upstream decisions change, without discarding audit history.
 9. Ship a domain service that is genuinely production-shaped: typed boundaries, structured errors, tests.
 10. Run end to end on a laptop with one command and no API keys.
@@ -44,7 +44,7 @@ The governing principle: **agents execute multi-step work under defined autonomy
 | Multi-node distributed orchestration | Single-process semantics are sufficient to demonstrate the control model. |
 | Kubernetes, Docker, Terraform | Deployment packaging adds no orchestration signal. |
 | Postgres, Alembic migrations | Schema is explicit in ORM models; migration tooling is a scaling concern. |
-| Authentication and multi-tenancy | Out of scope for a single-tenant local prototype; called out as a limitation. |
+| Authentication and multi-tenancy | Live shortener has no domain auth or tenants. An orchestrator run may add API-key protection in the isolated workspace. |
 | Autonomous deploy | Release is always human-approved by design. |
 
 ## 4. Constraints
@@ -134,7 +134,7 @@ Run status: `running`, `gate_wait`, `succeeded`, `failed`, `rolled_back`, `stopp
 
 Two pure modules supply the facts every later stage depends on.
 
-[`requirements.py`](../app/orchestrator/requirements.py) turns free text into a `RequirementAnalysis`: named `Capability` values from a marker table, ambiguities from vague-term detection plus decisions a capability implies but the text omits, per-capability acceptance criteria, and risk flags. Deterministic by design, so orchestration behaviour under test never depends on a model call.
+[`requirements.py`](../app/orchestrator/requirements.py) turns free text into a `RequirementAnalysis`: named `Capability` values from a marker table, ambiguities from vague-term detection plus decisions a capability implies but the text omits, per-capability acceptance criteria, and risk flags. `analyze(requirement, assumptions=None)` folds a human decision into that result: `auth=api_key|oauth` adds `AUTH`, `retention_days` adds `RETENTION` and a concrete criterion, and a stated rate threshold is not asked again. Deterministic by design, so orchestration behaviour under test never depends on a model call.
 
 [`codebase.py`](../app/orchestrator/codebase.py) parses every module under `app/` with the stdlib `ast` module and extracts:
 
@@ -142,7 +142,7 @@ Two pure modules supply the facts every later stage depends on.
 - **Tables** from classes inheriting `Base`, reading `__tablename__` and the annotated column names.
 - **Module facts** — classes, functions, imports, and lowercased source for marker matching.
 
-`impacted_by(capabilities)` maps each capability onto the modules, endpoints, and tables that actually contain its markers, with a confidence level and the reason it matched. Results are cached against a fingerprint of file paths and mtimes, so the cache invalidates when the tree changes.
+`impacted_by(capabilities)` maps each capability onto the **shortener** modules, endpoints, and tables that contain its markers (`app/shortener/` only). `scan()` still walks the whole `app/` package so endpoint discovery stays honest; control-plane files such as [`auth.py`](../app/orchestrator/auth.py) are not treated as the domain host. Results are cached against a fingerprint of file paths and mtimes, so the cache invalidates when the tree changes.
 
 The acceptance bar is behavioural: add a route to [`routes.py`](../app/shortener/routes.py) and the impact report grows without touching the orchestrator. A test proves this by writing a second route into a temporary package and asserting the endpoint list changes.
 
@@ -154,27 +154,30 @@ The graph is a function of **two** independent inputs. The scenario shapes the s
 
 ```mermaid
 flowchart LR
+  understand --> confirm_scope
   understand --> decompose
-  decompose --> impact_analysis
+  understand --> impact_analysis
+  confirm_scope --> decompose
+  impact_analysis --> decompose
   decompose --> design
-  impact_analysis --> design
   design --> implement
   implement --> test
   implement --> security_review
   test --> document
   security_review --> document
-  document --> release_readiness
+  document --> release_prepare
+  release_prepare --> release_approve
 ```
 
 Scenario shaping:
 
 - **Greenfield** — the base graph; `design` depends on `decompose`.
-- **Brownfield** — inserts `impact_analysis` between `decompose` and `design`, forcing codebase reasoning before any change is designed.
-- **Ambiguous** — marks `understand` as `human_required`, so the run pauses before committing to an interpretation.
+- **Brownfield** — inserts `impact_analysis` **before** `decompose`, so task files are filled from the scan rather than an empty optional read.
+- **Ambiguous** — inserts `confirm_scope` (`human_required`) after `understand` has written the brief, so the reviewer reads evidence and then decides.
 
-`release_readiness` is always `human_required`. Every produced graph is validated by `assert_acyclic`, which walks dependencies with a visiting/visited set and raises on cycles or unknown dependency ids. A planner bug becomes a loud error instead of a hung executor.
+`understand` is always `auto`. `release_prepare` is `auto` and writes `release_checklist.md`. `release_approve` is always `human_required` and may not be evaluated until that checklist exists. Every produced graph is validated by `assert_acyclic`, which walks dependencies with a visiting/visited set and raises on cycles or unknown dependency ids. A planner bug becomes a loud error instead of a hung executor.
 
-`replan(run, decision)` is additive. Given a human decision requesting authentication, it appends an `apply_assumptions` node and rewrites `decompose` to depend on it. Existing nodes keep their ids, statuses, and attempt counts; the audit log is never truncated. If the human chooses `auth: none`, the graph is returned unchanged. The result is re-validated for acyclicity.
+`replan(run, decision)` rebuilds implement fan-out from `analyze(requirement, assumptions)` while keeping human-added nodes such as `apply_assumptions`. Existing nodes keep their ids, statuses, and attempt counts; the audit log is never truncated. The result is re-validated for acyclicity.
 
 ### 6.5 Context bus
 
@@ -191,12 +194,12 @@ This closes a defect in the first version where every stage wrote and none read,
 1. **Safe-stop check.** If `stop_requested`, move every `pending` or `gate_wait` node to `stopped`, finalize, persist, return.
 2. **Readiness.** Collect `pending` nodes whose dependencies all succeeded (or failed with a fallback applied).
 3. **Gate check.** If any ready node is `human_required` and `auto_approve` is false, move those nodes to `gate_wait`, set the run to `gate_wait`, persist, and **return** — satisfying constraint C4.
-4. **Snapshot.** If `implement` is about to run, copy `artifacts/` to `snapshot/`.
+4. **Snapshot.** If `implement` is about to run, copy workspace + artifacts to `snapshot/` once per batch.
 5. **Parallel execution.** Run the entire ready set concurrently.
 6. **Retry and rollback evaluation.**
 7. **Loop** until no nodes are ready or a terminal state is reached.
 
-Concurrency uses `asyncio.gather(..., return_exceptions=True)` over per-node coroutines, each of which offloads synchronous stage work with `asyncio.to_thread`. Stage agents perform blocking file and subprocess I/O; running them directly on the event loop would serialize `test` and `security_review` and make the parallel branch a fiction.
+Concurrency uses `asyncio.gather(..., return_exceptions=True)` over per-node coroutines, each of which offloads synchronous stage work with `asyncio.to_thread`. An exception result is mapped onto that ready node via `_fail_node`; the executor never `continue`s past it and leaves the node `running`. Stage agents perform blocking file and subprocess I/O; running them directly on the event loop would serialize `test` and `security_review` and make the parallel branch a fiction.
 
 Because `document` requires both `test` and `security_review`, and readiness only admits nodes whose dependencies have succeeded, the join is a natural consequence of the readiness rule rather than special-cased barrier code. The test asserts on audit timestamps that `document` starts only after both parallel nodes finish.
 
@@ -206,7 +209,7 @@ The run is persisted after every state transition batch, and each transition app
 
 Each stage has two gates.
 
-The **entry gate** is the dependency and autonomy check in the readiness pass, plus a compliance check on `release_readiness` that refuses to evaluate a release when its required evidence is absent.
+The **entry gate** is the dependency and autonomy check in the readiness pass, plus a compliance check on `release_prepare` that refuses to evaluate a release when its required evidence is absent.
 
 The **exit gate** does two things in order. `validate_declared` asserts every name in `node.spec.produces` exists, is non-empty, and parses against its model in the [artifact registry](../app/orchestrator/artifacts.py). Then `check_artifacts` scans **only that node's files** for policy violations. Before this existed, `produces` was declared on every node and read by nothing, so a stage that wrote no output still passed.
 
@@ -239,30 +242,37 @@ sequenceDiagram
     API-->>Client: run document
 ```
 
-`POST /sdlc/runs/{id}/approve` validates that the node is actually in `gate_wait` and returns 409 (`not_waiting`) otherwise, so a stale client cannot force a stage. Before mutating state, it appends an audit event with `actor="human"`, the reviewer's note, and a truncated SHA-256 `decision_hash` of the decision payload. That hash is the decision-lineage primitive: the exact decision that unblocked the run is provable afterward.
+`POST /sdlc/runs/{id}/approve` validates that the node is actually in `gate_wait` and returns 409 (`not_waiting`) otherwise, so a stale client cannot force a stage. Approving `release_approve` also 409s if `release_checklist.md` is missing. Before mutating state, it appends an audit event with `actor` from `X-Approver-Id` (else `"human"`), the reviewer's note, and a truncated SHA-256 `decision_hash` of the decision payload. That hash is the decision-lineage primitive: the exact decision that unblocked the run is provable afterward.
 
-The approved node is flipped to `auto` for this run and set back to `pending`, and the executor resumes. For ambiguous runs, approving `understand` also triggers `replan`. `reject` fails the node and the run. `auto_approve=true` bypasses gates and exists for CI and the scripted demo only; the default is false, and change control overrides it regardless.
+The approved node is flipped to `auto` for this run and set back to `pending`, and the executor resumes. For ambiguous runs, approving `confirm_scope` persists assumptions, calls `replan`, and invalidates join stages so design and implement fan-out actually change. `reject` and `stop` write audit events the same way. `auto_approve=true` bypasses gates and exists for CI and the scripted demo only; the default is false, and change control overrides it regardless. Blocking security findings require a `waiver` in the decision.
 
 ### 6.9 Reliability controls
 
 - **Retry.** After a node fails, if `attempts < max_retries` the node transitions `failed → retrying → pending`, `retry_count` increments, an audit event is written, and the loop repeats after a 10 ms yield. `implement` and `test` carry `max_retries=2`.
 - **Fallback.** An `optional` node that exhausts its retries sets `fallback_applied`, increments `fallback_count`, and emits a `fallback_applied` audit event. The readiness check treats a failed-with-fallback dependency as satisfied and `_finalize` does not count it as a blocking failure, so the run continues **degraded** rather than failing. `static_analysis` is the optional gate: a lint finding should not block a release that passed its tests and security review.
-- **Rollback.** `implement` is the only stage with side effects worth undoing, so `artifacts/` is snapshotted before it runs. If its retries are exhausted, `restore_artifacts` puts the directory back, the node becomes `rolled_back`, and `rollback_count` increments.
-- **Safe-stop.** Cooperative and checked between iterations, never mid-stage. A stage completes or fails; it is not killed halfway with partial artifacts on disk.
+- **Rollback.** `implement` is the only stage with side effects worth undoing. `snapshot_artifacts` copies **workspace + artifacts** once per implement batch (it does not resnapshot between retries). If retries are exhausted, `restore_artifacts` puts both back, so `change.patch` after restore is empty, the node becomes `rolled_back`, and `rollback_count` increments.
+- **Safe-stop.** Cooperative and checked between iterations, including when the run is already in `gate_wait`. A `background` create returns the run id without awaiting `advance`; stop cancels that task and terminates an in-flight pytest/ruff subprocess.
 - **Resume.** `POST /sdlc/runs/{id}/resume` reloads from disk, resets nodes stranded in `running` back to `pending` with an audit note, and continues. Terminal runs are refused with `409 run_terminal`.
-- **Fault injection.** `inject_failure_node` and `inject_failure_count` on the create-run request make retry, rollback, fallback, and MTTR paths testable through the public API rather than through monkeypatching internals.
+- **Fault injection.** `inject_failure_node` and `inject_failure_count` on the create-run request make retry, rollback, fallback, and MTTR paths testable through the public API rather than through monkeypatching internals. Injection is disabled unless `allow_failure_injection` is set (pytest turns it on).
 
 ### 6.10 Re-planning and invalidation
 
-[`invalidation.py`](../app/orchestrator/invalidation.py) makes re-planning mean something. Before a node executes, `compute_input_hash` records a digest of the requirement, the node spec, and every upstream artifact the node is entitled to read.
+[`invalidation.py`](../app/orchestrator/invalidation.py) makes re-planning mean something. Before a node executes, `compute_input_hash` records a digest of the node spec, current assumptions, and every upstream artifact the node is entitled to read. Only `understand` also hashes the raw requirement, so an amend does not dirty every node.
 
-`POST /sdlc/runs/{id}/amend` accepts a revised requirement, re-runs analysis and the planner, adds new nodes, drops obsolete ones (preserving human-added nodes such as `apply_assumptions`), then calls `invalidate_stale`. Any node whose recomputed hash differs, plus every descendant, returns to `pending`. Untouched branches keep their `succeeded` status, so invalidation is surgical rather than a reset. The audit log is append-only, so the pre-amend history survives and the amend event records what was added, removed, and invalidated.
+`POST /sdlc/runs/{id}/amend` accepts a revised requirement, re-runs analysis and the planner, adds new nodes, drops obsolete ones (preserving human-added nodes such as `apply_assumptions`), deletes artifacts of removed nodes, and applies a surgical policy:
+
+1. New `implement_*` nodes are `pending`.
+2. Sibling `implement_*` whose capability remains stay `succeeded`.
+3. Join stages (`test`, `security_review`, `static_analysis`, `document`, `release_prepare`, `release_approve`) always reset.
+4. Refresh stages (`understand`, `decompose`, `design`, …) rewrite their artifacts without forcing sibling implements to re-run.
+
+The audit log is append-only, so the pre-amend history survives and the amend event records what was added, removed, and invalidated.
 
 ### 6.11 Concurrency control
 
-`RunState` carries a `version`. `save_run` compares it against the version on disk and raises `409 run_conflict` on a mismatch, and the mutating routes wrap read-modify-write in an `flock` on `runs/{id}/.lock`.
+`RunState` carries a `version`. `save_run` compares it against the version on disk and raises `409 run_conflict` on a mismatch, writes to a unique `run.json.{pid}.{tid}.tmp`, and the mutating routes wrap read-modify-write in a per-run `threading.Lock` plus an OS file lock (`fcntl.flock` on POSIX, `msvcrt.locking` on Windows) on `runs/{id}/.lock`.
 
-Both are needed: the lock serialises the cycle within and across processes, and the version check catches a writer holding state loaded before the lock was taken. A test drives two concurrent approvals of the same node twenty times and asserts exactly one winner with the loser receiving a clean conflict rather than silently overwriting.
+Both are needed: the thread lock serialises same-process writers (flock is process-scoped), the file lock serialises across processes, and the version check catches a writer holding state loaded before the lock was taken. A test drives two concurrent approvals of the same node twenty times and asserts exactly one winner with the loser receiving a clean conflict rather than silently overwriting.
 
 ### 6.12 Run store
 
@@ -271,9 +281,10 @@ Both are needed: the lock serialises the cycle within and across processes, and 
 ```
 runs/{run_id}/
   run.json        current state (overwritten atomically)
-  audit.jsonl     append-only transition log
-  artifacts/      stage outputs
-  snapshot/       pre-implement copy for rollback
+  audit.jsonl     append-only transition log with seq/prev_hash
+  artifacts/      stage outputs including change.patch
+  workspace/      isolated copy of app/ and tests/
+  snapshot/       pre-implement copy of artifacts + workspace
 ```
 
 Two integrity properties:
@@ -290,26 +301,30 @@ Two integrity properties:
 | Stage | Reads | Produces |
 |---|---|---|
 | understand | requirement analysis | `requirement_brief.json` |
-| decompose | `requirement_brief.json` | `task_dag.json` |
+| confirm_scope | brief (already on disk) | `scope_decision.json` |
+| decompose | `requirement_brief.json`, `impact.json` on brownfield | `task_dag.json` |
 | impact_analysis | `requirement_brief.json` + codebase scan | `impact.json` |
-| design | `requirement_brief.json`, `impact.json` | `design.md` |
-| implement_* | `design.md` + codebase scan | `implementation_<capability>.json` |
-| test | run config | `test_report.json` |
-| static_analysis | — (optional gate) | `static_analysis.json` |
-| security_review | codebase scan, analysis | `security_review.json` |
-| document | `test_report.json`, `security_review.json`, brief | `document.md` |
-| release_readiness | test, security, static reports | `release_checklist.md` |
+| design | `requirement_brief.json`, `impact.json`, assumptions | `design.md` |
+| implement_* | `design.md` + codebase scan | `implementation_<capability>.json`; adapter nodes also declare `change.patch` |
+| test | run config, workspace | `test_report.json` |
+| static_analysis | workspace (optional gate) | `static_analysis.json` |
+| security_review | codebase scan, analysis, `change.patch` when declared | `security_review.json` (typed findings with severity/blocking) |
+| document | `test_report.json`, `security_review.json`, implement reports, patch pointer | `document.md` (rationale, risks, assumptions, limitations, change) |
+| release_prepare | test, security, static reports | `release_checklist.md` |
+| release_approve | checklist + waiver if blocking | `release_approval.json` |
 | apply_assumptions | recorded human decision | `assumptions.json` |
 
 Because each stage consumes upstream output, artifacts vary with the run: `design.md` names the capabilities detected in that requirement and the modules impact analysis found, and `document.md` reports the actual test verdict. Two different requirements cannot produce identical artifacts, and tests assert exactly that.
 
-The `test` stage is not a mock. It runs `python -m pytest <target> -q` as a subprocess with `cwd` pinned to the repository root, a timeout, no `shell=True`, and output truncated to 8 KB. A non-zero exit code raises, which fails the node and — after retries — the run. The target is configurable, which is how the failing path is proven rather than asserted.
+The `test` stage is not a mock. It runs `python -m pytest <target> -q` as a subprocess in the run workspace, a timeout, no `shell=True`, and output truncated to 8 KB. Adapter-generated tests (`tests/test_export.py`, `tests/test_caching.py`, `tests/test_domain_auth.py`) are included when present. A non-zero exit code raises, which fails the node and — after retries — the run. The target must be a relative path under `tests/`.
 
-`release_readiness` fails when its evidence shows a failure, so the checklist is a gate rather than a formality.
+`release_prepare` fails when its evidence shows a failure, so the checklist is a gate rather than a formality. Humans approve `release_approve` only after that file exists.
+
+`implement_*` looks up `ctx.node.spec.capability` in the adapter registry. An adapter patches the isolated workspace and records `changed_files`. If AST impact finds the capability at medium/high confidence **in the shortener** and there is no adapter, the report sets `already_present=true` and claims nothing was delivered. If neither adapter nor existing implementation exists, the node fails closed. Adapters exist for export, caching, and auth.
 
 ### 6.14 Observability and metrics
 
-`GET /sdlc/runs/{id}/trace` returns the parsed audit log. [`metrics.py`](../app/orchestrator/metrics.py) computes:
+`GET /sdlc/runs/{id}/trace` returns the parsed audit log, including `seq` and `prev_hash` so the chain can be walked. [`metrics.py`](../app/orchestrator/metrics.py) computes:
 
 | Metric | Definition |
 |---|---|
@@ -345,7 +360,7 @@ Application logs are JSON on stderr with a `request_id` from [`logging_config.py
 
 **Rate limiting.** [`app/shortener/rate_limit.py`](../app/shortener/rate_limit.py) is a per-IP sliding window applied only to `POST /v1/shorten` — the write path. Exceeding it returns 429 with `Retry-After`, and the check happens before any database work. Keys are pruned when their window expires and evicted least-recently-used past a cap, so a long-lived process facing many clients cannot grow without bound. The limiter lives on `app.state` so tests get a fresh instance.
 
-**Idempotency.** An `Idempotency-Key` header (capped at 128 characters) is stored with a SHA-256 hash of the canonical request body and the serialized response. Same key with same body replays the stored response; same key with a different body returns 409 `idempotency_conflict`. The key itself is never logged, and a test asserts it never appears in captured output.
+**Idempotency.** An `Idempotency-Key` header (capped at 128 characters) is stored with a SHA-256 hash of the canonical request body and the serialized response. Lookup uses the same truncated key. Create-and-store of a new URL under a key is serialised with an in-process lock so two concurrent requests cannot both insert. Same key with same body replays the stored response; same key with a different body returns 409 `idempotency_conflict`. The key itself is never logged, and a test asserts it never appears in captured output.
 
 ### 6.16 API surface
 
@@ -356,11 +371,15 @@ Application logs are JSON on stderr with a `request_id` from [`logging_config.py
 | POST | `/v1/shorten` | Create short URL (alias, TTL, idempotency) |
 | GET | `/v1/urls/{code}` | Metadata |
 | GET | `/v1/urls/{code}/stats` | Click analytics |
+| GET | `/v1/urls/{code}/export` | CSV of clicks (adapter-added in a run workspace) |
 | DELETE | `/v1/urls/{code}` | Delete a URL and its click history |
 | GET | `/{code}` | 302 redirect and click capture |
-| POST | `/sdlc/runs` | Create and advance a run |
+| POST | `/sdlc/runs` | Create and advance a run (`background=true` returns immediately) |
 | GET | `/sdlc/runs/{id}` | Run state |
 | GET | `/sdlc/runs/{id}/trace` | Audit trace |
+| GET | `/sdlc/runs/{id}/artifacts` | Artifact manifest |
+| GET | `/sdlc/runs/{id}/artifacts/{name}` | Artifact body |
+| GET | `/sdlc/runs/{id}/diff` | `change.patch` or 404 |
 | POST | `/sdlc/runs/{id}/approve` | Approve a gated node |
 | POST | `/sdlc/runs/{id}/reject` | Reject a gated node |
 | POST | `/sdlc/runs/{id}/amend` | Revise the requirement and re-plan |
@@ -468,7 +487,7 @@ Option (b) is the more impressive demo and the worse engineering decision. Gener
 
 With (a), the orchestrator performs the work that is actually being evaluated: it names real impacted modules, runs the real test suite, applies real policy checks, and gates a real release. The [README.md](../README.md) states this explicitly rather than implying the code was agent-written.
 
-**Cost accepted.** The `implement` stage produces a mapping report rather than a diff. This is disclosed, not hidden.
+**Cost accepted.** Export, caching, and auth adapters produce a real unified diff in an isolated workspace. Other named capabilities validate existing modules (`already_present`) or fail closed. The live tree is never mutated by a run.
 
 ### D9 — Approval gates default closed vs. default open
 
@@ -484,11 +503,13 @@ Controlled autonomy means the human is in the path by default. Defaulting open w
 
 **Options.** (a) `advance()` runs inside the HTTP handler and returns at the first gate or terminal state. (b) A queue and worker pool with the API returning `202 Accepted` immediately.
 
-**Chosen: inline with gate-bounded returns.**
+**Chosen: inline by default, with an optional background escape hatch.**
 
 A worker pool is the correct production answer for long-running agent work. It needs a broker (violating C1) and makes every test asynchronous with polling. Inline execution combined with the rule "never block on a human" gets most of the benefit: the request returns promptly at `gate_wait`, and the run resumes on the next approval call. Work is genuinely concurrent within a batch via `asyncio.gather`.
 
-**Cost accepted.** A long automated stage holds the request open. With real LLM stages, this becomes untenable and D10 is the first decision to revisit.
+`CreateRunRequest.background` (default `false`) persists the run and returns the id with `status=running` so `/stop` can interrupt the first long stage. Existing TestClient tests stay inline.
+
+**Cost accepted.** A long automated stage still holds the request open unless `background=true`. With real LLM stages, a worker pool remains the next step.
 
 ### D11 — Random codes vs. counter or hash based
 
@@ -546,7 +567,7 @@ Every row names a test. Where the earlier version of this document cited a "cont
 - **Server-side request forgery adjacency.** Setting `ALLOW_PRIVATE_TARGETS=false` blocks loopback, private, link-local, and reserved targets. Note this is redirect-target hygiene; the service never fetches the target itself.
 - **Code enumeration.** Random 7-character codes from `secrets` plus write-path rate limiting. Short links are unguessable, not authenticated — a leaked code is a working link.
 - **Secret leakage through artifacts.** Security pack blocks token-shaped strings, private-key blocks, and PII patterns; the audit log records only the rule name.
-- **Unauthorised release approval.** The control plane requires `X-API-Key` when configured, compared with `secrets.compare_digest` to avoid a timing side channel. Change control additionally prevents an agent from approving a high-impact release even with valid credentials.
+- **Unauthorised release approval.** The control plane requires `X-API-Key` when configured, compared with `secrets.compare_digest` to avoid a timing side channel. `X-Approver-Id` is recorded on approve/reject/stop when present. Change control additionally prevents an agent from approving a high-impact release even with valid credentials. Blocking findings need an explicit waiver.
 - **Path traversal into run storage.** Strict UUID validation before any path join.
 - **Injection.** SQLAlchemy parameterized queries throughout. The subprocess call uses an argument list with `shell=False` and a fixed working directory.
 - **Log hygiene.** API keys and idempotency keys are never logged, asserted by a test that captures output and searches for both. Errors return codes and messages, never stack traces.
@@ -557,7 +578,7 @@ Every row names a test. Where the earlier version of this document cited a "cont
 
 ## 10. Testing strategy
 
-139 tests across the two layers, plus `ruff` as a lint gate. Both run in CI on every push across Python 3.11 and 3.12, alongside a job that executes all three scenarios with and without the control plane secured.
+162 tests across the two layers, plus `ruff` as a lint gate. Both run in CI on every push across Python 3.11 and 3.12, alongside a job that executes all three scenarios with and without the control plane secured.
 
 - **Analysis** — capability detection, ambiguity detection, criteria generation.
 - **Codebase reasoning** — endpoint and table discovery against the real tree, and a temporary package proving the report grows when the source grows.
@@ -600,18 +621,18 @@ Stated plainly, because an undisclosed gap is worse than a known one. Items clos
 **Correctness and concurrency**
 
 4. Recovery is an explicit `resume` call, not automatic detection. Nothing sweeps for runs abandoned by a crashed process.
-5. `advance()` executes inline in the request. A long automated stage holds the connection open; see D10.
+5. `advance()` executes inline in the request unless `background=true`. A long automated inline stage holds the connection open; see D10.
 6. Capability detection is a marker table, so a requirement phrased unusually may under-detect. It is deterministic and inspectable, which is the trade for not calling a model.
 
 **Security**
 
-7. Control-plane auth is a single shared key, not per-user identity, so `actor: human` records that a human approved but not which one.
+7. Control-plane auth is a shared key plus optional `X-Approver-Id`, not per-user SSO.
 8. The security pack is illustrative rather than a full secret-scanning ruleset; a real deployment would add a maintained scanner.
 9. Retention purge exists but is not scheduled; something must invoke it.
 
 **Functional**
 
-10. `implement_*` reports the modules a change targets rather than producing a diff (decision D8).
+10. Adapters cover export, caching, and auth; other capabilities validate in place or fail closed (see §11.1).
 11. Re-planning triggers on an explicit amend or a human decision. It does not watch the filesystem for drift.
 12. Impact confidence is a coarse heuristic from match counts, not a calibrated score.
 
@@ -632,6 +653,20 @@ Each of these was a disclosed gap in the previous version of this document and n
 - Metrics rescanned every run per request; a rollup with a consistency test now backs it.
 - The limiter leaked keys, aliases could shadow routes, and click data had no deletion or retention path.
 - There was no CI; lint, tests, and all three scenarios now run on every push.
+- Implement reported success without changing code; export, caching, and auth adapters now write an isolated workspace and a unified diff, and unknown capabilities fail closed.
+- Impact treated control-plane `api_key` as the shortener; `impacted_by` is now scoped to `app/shortener/`.
+- Brownfield ran decompose before impact, so `task_dag.json` never received scan files; impact now precedes decompose.
+- HITL gated before evidence existed; `release_prepare` writes the checklist, then `release_approve` waits, and artifact GET APIs expose it.
+- `fcntl` was imported unconditionally; the lock helper now uses a thread lock plus `fcntl`/`msvcrt`.
+- Gather exceptions could leave a node `running`; unexpected exceptions now fail the node.
+- Ambiguous decisions were stickers; `analyze(..., assumptions=)` now reshapes capabilities, design, and implement fan-out.
+- Re-plan hashed the whole requirement; sibling `implement_*` nodes now stay succeeded, and removed artifacts are deleted.
+- Rollback restored artifacts only; it now restores the workspace from a once-per-batch snapshot.
+- Create-run always awaited `advance()`; `background=true` returns the id so `/stop` can interrupt.
+- Concurrent approvals could both return 200; the thread lock makes `[200, 409]` hold over 20 iterations.
+- Audit lacked reject/stop events and a hash chain; `seq`/`prev_hash` and `X-Approver-Id` are now recorded.
+- Security findings were advisory strings; they are typed, and AUTH/RETENTION findings block without a waiver.
+- Idempotency lookup and store could race; create-and-store is now locked and the lookup key is truncated to match storage.
 
 ---
 
@@ -683,9 +718,9 @@ Packs live in [`scenarios/`](../scenarios/) and are validated by a Pydantic mode
 
 | Scenario | Requirement | Orchestration behaviour |
 |---|---|---|
-| Greenfield | Build a URL shortener with core APIs | Capability fan-out, parallel test and security review, human release gate |
-| Brownfield | Add analytics and rate limiting to the existing URL shortener | `impact_analysis` before design, naming modules, endpoints, and tables from the AST |
-| Ambiguous | Make it enterprise-ready | `understand` gates for a human; approval carries assumptions; additive re-plan adds `apply_assumptions` |
+| Greenfield | Add CSV export of click analytics | New feature on the existing service; adapter writes CSV export in the workspace and a non-empty `change.patch` |
+| Brownfield | Add in-process caching to URL metadata reads | `impact_analysis` before decompose; caching adapter; live tree unchanged |
+| Ambiguous | Make it enterprise-ready | `confirm_scope` after the brief; `{auth, retention_days}` adds implement nodes; AUTH adapter patches the workspace; live tree unchanged |
 
 `python -m app.demo` runs all three in process, prints a JSON summary to stdout, and exits non-zero if any scenario does not succeed, which is why CI can use it as a smoke test.
 
@@ -703,9 +738,10 @@ app/
   orchestrator/        SDLC engine
     agents.py artifacts.py auth.py codebase.py context.py executor.py
     invalidation.py metrics.py models.py planner.py policy.py
-    requirements.py routes.py schemas.py store.py
+    requirements.py routes.py schemas.py store.py workspace.py
+    adapters/          export.py, caching.py, auth.py
 scenarios/             greenfield, brownfield, ambiguous
-tests/                 139 tests, plus fixtures/failing_suite.py for the test gate
+tests/                 suite plus fixtures/failing_suite.py for the test gate
 .github/workflows/     CI: lint, tests on 3.11 and 3.12, scenario smoke
 docs/DESIGN.md         this document
 ```

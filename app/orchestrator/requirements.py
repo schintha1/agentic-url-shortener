@@ -138,8 +138,13 @@ def detect_capabilities(requirement: str) -> list[Capability]:
     return found
 
 
-def detect_ambiguities(requirement: str, capabilities: list[Capability]) -> list[str]:
+def detect_ambiguities(
+    requirement: str,
+    capabilities: list[Capability],
+    assumptions: dict[str, str] | None = None,
+) -> list[str]:
     haystack = requirement.lower()
+    assumptions = assumptions or {}
     ambiguities: list[str] = []
     seen: set[str] = set()
     for term, question in VAGUE_TERMS.items():
@@ -148,9 +153,21 @@ def detect_ambiguities(requirement: str, capabilities: list[Capability]) -> list
             seen.add(question)
     for capability in capabilities:
         question = IMPLIED_DECISIONS.get(capability)
-        if question and question not in seen:
-            ambiguities.append(question)
-            seen.add(question)
+        if not question or question in seen:
+            continue
+        if capability is Capability.AUTH and assumptions.get("auth") not in {None, "", "none"}:
+            continue
+        if capability is Capability.RETENTION and assumptions.get("retention_days"):
+            continue
+        if capability is Capability.CACHING and assumptions.get("cache"):
+            continue
+        if capability is Capability.RATE_LIMIT and (
+            assumptions.get("rate_limit")
+            or re.search(r"\d+\s*(requests?\s*)?(per|/)\s*min", haystack)
+        ):
+            continue
+        ambiguities.append(question)
+        seen.add(question)
     return ambiguities
 
 
@@ -167,15 +184,29 @@ def _risk_flags(capabilities: list[Capability]) -> list[str]:
     return flags
 
 
-def analyze(requirement: str) -> RequirementAnalysis:
+def analyze(
+    requirement: str, assumptions: dict[str, str] | None = None
+) -> RequirementAnalysis:
     """Normalise a requirement into capabilities, ambiguities, and criteria."""
 
+    assumptions = {k: str(v) for k, v in (assumptions or {}).items()}
     intent = " ".join(requirement.split()).strip()
     capabilities = detect_capabilities(requirement)
-    ambiguities = detect_ambiguities(requirement, capabilities)
+    auth = assumptions.get("auth", "")
+    if auth and auth not in {"none", ""} and Capability.AUTH not in capabilities:
+        capabilities.append(Capability.AUTH)
+    if assumptions.get("retention_days") and Capability.RETENTION not in capabilities:
+        capabilities.append(Capability.RETENTION)
+    ambiguities = detect_ambiguities(requirement, capabilities, assumptions)
     criteria: list[str] = []
     for capability in capabilities:
         criteria.extend(CAPABILITY_CRITERIA.get(capability, ()))
+    if assumptions.get("retention_days"):
+        criteria.append(
+            f"Records older than {assumptions['retention_days']} days are purged"
+        )
+    if auth and auth not in {"none", ""}:
+        criteria.append(f"Authentication uses the {auth} scheme")
     if not criteria:
         criteria = [
             "The requirement is restated as a testable outcome",

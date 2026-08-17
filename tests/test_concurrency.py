@@ -20,7 +20,7 @@ def test_concurrent_approvals_do_not_lose_an_update(client: TestClient) -> None:
     runs_dir = client.app.state.settings.runs_dir
     for _ in range(20):
         run_id = _gated_run(client)
-        payload = {"node_id": "release_readiness", "decision": {}, "note": "race"}
+        payload = {"node_id": "release_approve", "decision": {}, "note": "race"}
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [
@@ -29,14 +29,11 @@ def test_concurrent_approvals_do_not_lose_an_update(client: TestClient) -> None:
             ]
             statuses = sorted(future.result().status_code for future in futures)
 
-        assert statuses[0] == 200, f"expected one winner, got {statuses}"
-        assert statuses[1] in {200, 409}
-        if statuses[1] == 409:
-            assert statuses == [200, 409]
+        assert statuses == [200, 409], f"expected one winner and one 409, got {statuses}"
 
         # Whatever the interleaving, the persisted run must be coherent.
         run = load_run(runs_dir, run_id)
-        node = run.nodes["release_readiness"]
+        node = run.nodes["release_approve"]
         assert node.status.value in {"succeeded", "pending", "running"}
         assert run.version >= 1
 
@@ -47,7 +44,7 @@ def test_version_increments_on_every_write(client: TestClient) -> None:
     first = load_run(runs_dir, run_id).version
     client.post(
         f"/sdlc/runs/{run_id}/approve",
-        json={"node_id": "release_readiness", "decision": {}, "note": "ok"},
+        json={"node_id": "release_approve", "decision": {}, "note": "ok"},
     )
     second = load_run(runs_dir, run_id).version
     assert second > first

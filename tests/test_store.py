@@ -37,3 +37,20 @@ def test_rejects_path_traversal(tmp_path) -> None:
         assert exc.code == "invalid_run_id"
     else:
         raise AssertionError("expected AppError")
+
+
+def test_run_lock_creates_a_lock_file(tmp_path) -> None:
+    from app.orchestrator.store import run_lock
+
+    run_id = str(uuid.uuid4())
+    with run_lock(str(tmp_path), run_id):
+        assert (tmp_path / run_id / ".lock").exists()
+
+
+def test_store_module_imports_without_fcntl() -> None:
+    """The lock helper must be importable on Windows, where fcntl is absent."""
+
+    from app.orchestrator import store
+
+    assert hasattr(store, "run_lock")
+    assert "fcntl" not in store.__dict__

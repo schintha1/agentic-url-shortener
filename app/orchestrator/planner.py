@@ -1,16 +1,26 @@
 """Requirement-driven DAG planning.
 
 The graph is a function of two independent inputs: the scenario shapes the spine
-(brownfield adds impact analysis, ambiguous gates the first stage for a human)
-and the requirement text determines the implementation fan-out. Changing either
-changes the plan.
+(brownfield inserts impact analysis before decompose; ambiguous gates confirm_scope
+after the brief) and the requirement text determines the implementation fan-out.
+Changing either changes the plan.
 """
 
 from app.errors import AppError
+from app.orchestrator.adapters import ADAPTERS
 from app.orchestrator.models import Autonomy, NodeSpec, RunState, ScenarioType
 from app.orchestrator.requirements import Capability, RequirementAnalysis, analyze
 
 SCENARIOS = {item.value for item in ScenarioType}
+
+JOIN_STAGES = {
+    "test",
+    "security_review",
+    "static_analysis",
+    "document",
+    "release_prepare",
+    "release_approve",
+}
 
 
 def implement_node_id(capability: Capability) -> str:
@@ -36,63 +46,80 @@ def _implementation_nodes(analysis: RequirementAnalysis) -> list[NodeSpec]:
                 max_retries=2,
             )
         ]
-    return [
-        NodeSpec(
-            id=implement_node_id(capability),
-            stage="implement",
-            requires=["design"],
-            produces=[implement_artifact(capability)],
-            max_retries=2,
-            capability=capability,
+    nodes: list[NodeSpec] = []
+    for capability in analysis.capabilities:
+        produces = [implement_artifact(capability)]
+        if capability in ADAPTERS:
+            produces.append("change.patch")
+        nodes.append(
+            NodeSpec(
+                id=implement_node_id(capability),
+                stage="implement",
+                requires=["design"],
+                produces=produces,
+                max_retries=2,
+                capability=capability,
+            )
         )
-        for capability in analysis.capabilities
-    ]
+    return nodes
 
 
-def plan(scenario: str, requirement: str) -> list[NodeSpec]:
+def plan(
+    scenario: str,
+    requirement: str,
+    assumptions: dict[str, str] | None = None,
+) -> list[NodeSpec]:
     """Return a cycle-free DAG derived from the scenario and the requirement."""
 
     if scenario not in SCENARIOS:
         raise ValueError(f"Unknown scenario: {scenario}")
-    analysis = analyze(requirement)
+    analysis = analyze(requirement, assumptions)
 
     understand = NodeSpec(
         id="understand",
         stage="understand",
         produces=["requirement_brief.json"],
-        autonomy=(
-            Autonomy.HUMAN_REQUIRED
-            if scenario == ScenarioType.AMBIGUOUS.value
-            else Autonomy.AUTO
-        ),
+        autonomy=Autonomy.AUTO,
     )
-    nodes: list[NodeSpec] = [
-        understand,
-        NodeSpec(
-            id="decompose",
-            stage="decompose",
-            requires=["understand"],
-            produces=["task_dag.json"],
-        ),
-    ]
+    nodes: list[NodeSpec] = [understand]
+    spine_requires = ["understand"]
+    if scenario == ScenarioType.AMBIGUOUS.value:
+        nodes.append(
+            NodeSpec(
+                id="confirm_scope",
+                stage="confirm_scope",
+                requires=["understand"],
+                produces=["scope_decision.json"],
+                autonomy=Autonomy.HUMAN_REQUIRED,
+            )
+        )
+        spine_requires = ["confirm_scope"]
 
-    design_requires = ["decompose"]
     if scenario == ScenarioType.BROWNFIELD.value:
         nodes.append(
             NodeSpec(
                 id="impact_analysis",
                 stage="impact_analysis",
-                requires=["decompose"],
+                requires=list(spine_requires),
                 produces=["impact.json"],
             )
         )
-        design_requires = ["impact_analysis"]
+        spine_requires = ["impact_analysis"]
+
+    nodes.append(
+        NodeSpec(
+            id="decompose",
+            stage="decompose",
+            requires=spine_requires,
+            produces=["task_dag.json"],
+        )
+    )
 
     nodes.append(
         NodeSpec(
             id="design",
             stage="design",
-            requires=design_requires,
+            requires=["decompose"],
             produces=["design.md"],
         )
     )
@@ -116,7 +143,6 @@ def plan(scenario: str, requirement: str) -> list[NodeSpec]:
                 requires=list(implementation_ids),
                 produces=["security_review.json"],
             ),
-            # Optional quality gate: findings degrade the run instead of blocking it.
             NodeSpec(
                 id="static_analysis",
                 stage="static_analysis",
@@ -132,10 +158,16 @@ def plan(scenario: str, requirement: str) -> list[NodeSpec]:
                 produces=["document.md"],
             ),
             NodeSpec(
-                id="release_readiness",
-                stage="release_readiness",
+                id="release_prepare",
+                stage="release_prepare",
                 requires=["document"],
                 produces=["release_checklist.md"],
+            ),
+            NodeSpec(
+                id="release_approve",
+                stage="release_approve",
+                requires=["release_prepare"],
+                produces=["release_approval.json"],
                 autonomy=Autonomy.HUMAN_REQUIRED,
             ),
         ]
@@ -145,16 +177,26 @@ def plan(scenario: str, requirement: str) -> list[NodeSpec]:
 
 
 def replan(run: RunState, decision: dict[str, object]) -> list[NodeSpec]:
-    """Additively fold a human decision into the graph without dropping nodes."""
+    """Rebuild fan-out from the decided assumptions without dropping human nodes."""
 
-    specs = [state.spec for state in run.nodes.values()]
-    auth = str(decision.get("auth", "api_key"))
-    if auth == "none" or any(spec.id == "apply_assumptions" for spec in specs):
+    assumptions = {k: str(v) for k, v in decision.items()} if decision else dict(run.assumptions)
+    specs = plan(run.scenario.value, run.requirement, assumptions)
+    if not assumptions or str(assumptions.get("auth", "")) == "none":
+        if any(spec.id == "apply_assumptions" for spec in run.nodes.values()):
+            return _with_apply_assumptions(specs, already=True)
+        return specs
+    return _with_apply_assumptions(specs, already=False)
+
+
+def _with_apply_assumptions(specs: list[NodeSpec], *, already: bool) -> list[NodeSpec]:
+    if already or any(spec.id == "apply_assumptions" for spec in specs):
         return specs
     extra = NodeSpec(
         id="apply_assumptions",
         stage="apply_assumptions",
-        requires=["understand"],
+        requires=["confirm_scope"]
+        if any(spec.id == "confirm_scope" for spec in specs)
+        else ["understand"],
         produces=["assumptions.json"],
     )
     updated: list[NodeSpec] = []

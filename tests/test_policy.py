@@ -52,6 +52,28 @@ def test_policy_rejects_pii(tmp_path: Path) -> None:
     assert "alice@example.com" not in exc.value.message
 
 
+def test_policy_patch_decorator_is_not_an_email(tmp_path: Path) -> None:
+    """Unified diffs add a `+` prefix; `+@router.get` must not trip pii_email."""
+
+    patch = tmp_path / "change.patch"
+    patch.write_text(
+        "--- a/routes.py\n+++ b/routes.py\n@@ -1,0 +1,1 @@\n"
+        '+@router.get("/v1/urls/{code}/export")\n',
+        encoding="utf-8",
+    )
+    check_artifacts(tmp_path, only=["change.patch"])
+
+
+def test_policy_still_rejects_email_in_a_patch(tmp_path: Path) -> None:
+    (tmp_path / "change.patch").write_text(
+        "--- a/notes.md\n+++ b/notes.md\n@@ -1,0 +1,1 @@\n+contact alice@example.com\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(AppError) as exc:
+        check_artifacts(tmp_path, only=["change.patch"])
+    assert "pii_email" in exc.value.message
+
+
 def test_policy_skips_binary(tmp_path: Path) -> None:
     (tmp_path / "blob.bin").write_bytes(b"\xff\xfe\x00")
     check_artifacts(tmp_path)
@@ -121,7 +143,7 @@ def test_auto_approve_cannot_release_a_high_impact_change(client: TestClient) ->
     )
     body = response.json()
     assert body["status"] == "gate_wait", "change control must override auto_approve"
-    release = body["nodes"]["release_readiness"]
+    release = body["nodes"]["release_approve"]
     assert release["status"] == "gate_wait"
     assert release["change_controlled"] is True
 
@@ -130,7 +152,11 @@ def test_auto_approve_cannot_release_a_high_impact_change(client: TestClient) ->
 
     approved = client.post(
         f"/sdlc/runs/{body['id']}/approve",
-        json={"node_id": "release_readiness", "decision": {}, "note": "reviewed by a human"},
+        json={
+            "node_id": "release_approve",
+            "decision": {"waiver": "accepted"},
+            "note": "reviewed by a human",
+        },
     )
     assert approved.json()["status"] == "succeeded"
 
@@ -148,4 +174,4 @@ def test_auto_approve_still_works_for_low_impact_change(client: TestClient) -> N
     )
     body = response.json()
     assert body["status"] == "succeeded"
-    assert body["nodes"]["release_readiness"]["change_controlled"] is False
+    assert body["nodes"]["release_approve"]["change_controlled"] is False

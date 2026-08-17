@@ -16,6 +16,7 @@ from app.orchestrator.requirements import Capability
 ROUTE_DECORATOR_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 ROUTE_DECORATOR_OWNERS = {"router", "app"}
 DECLARATIVE_BASES = {"Base"}
+DOMAIN_PREFIX = "app/shortener/"
 
 CAPABILITY_CODE_MARKERS: dict[Capability, tuple[str, ...]] = {
     Capability.SHORTEN: ("shorten", "generate_code", "alphabet", "custom_alias"),
@@ -24,7 +25,7 @@ CAPABILITY_CODE_MARKERS: dict[Capability, tuple[str, ...]] = {
     Capability.RATE_LIMIT: ("rate_limit", "slidingwindow", "retry-after", "rate_limited"),
     Capability.IDEMPOTENCY: ("idempotency", "idempotencyrecord", "body_hash"),
     Capability.AUTH: ("api_key", "x-api-key", "compare_digest", "authorization"),
-    Capability.RETENTION: ("retention", "purge", "cascade", "delete"),
+    Capability.RETENTION: ("retention", "purge", "cascade"),
     Capability.CACHING: ("cache", "lru_cache", "redis"),
     Capability.EXPORT: ("export", "csv"),
     Capability.OBSERVABILITY: ("logging", "logger", "audit", "metrics", "request_id"),
@@ -96,7 +97,9 @@ class CodebaseMap:
 
     def modules_containing(self, markers: tuple[str, ...]) -> list[str]:
         hits: list[str] = []
-        for name, facts in sorted(self.modules.items()):
+        for _name, facts in sorted(self.modules.items()):
+            if not in_domain(facts.path):
+                continue
             if any(marker in facts.source_lower for marker in markers):
                 hits.append(facts.path)
         return hits
@@ -116,7 +119,8 @@ class CodebaseMap:
             matched_endpoints = [
                 endpoint.label
                 for endpoint in self.endpoints
-                if any(
+                if in_domain(endpoint.module)
+                and any(
                     marker in endpoint.path.lower() or marker in endpoint.handler.lower()
                     for marker in markers
                 )
@@ -124,7 +128,8 @@ class CodebaseMap:
             matched_tables = [
                 table.name
                 for table in self.tables
-                if any(
+                if in_domain(table.module)
+                and any(
                     marker in table.name.lower()
                     or marker in table.model.lower()
                     or any(marker in column.lower() for column in table.columns)
@@ -160,6 +165,12 @@ class CodebaseMap:
             scanned_modules=len(self.modules),
             unmatched_capabilities=unmatched,
         )
+
+
+def in_domain(path: str) -> bool:
+    """True when the path is a shortener module, not the control plane."""
+
+    return path.startswith(DOMAIN_PREFIX)
 
 
 def _confidence(module_hits: int, endpoint_hits: int) -> str:

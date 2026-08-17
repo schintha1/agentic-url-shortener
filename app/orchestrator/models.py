@@ -64,6 +64,9 @@ class AuditEvent(BaseModel):
     actor: str
     message: str
     extra: dict[str, str] = Field(default_factory=dict)
+    seq: int = 0
+    prev_hash: str = ""
+    artifact_digest: str = ""
 
 
 class RunStatus(str, Enum):
@@ -95,3 +98,4 @@ class RunState(BaseModel):
     fallback_count: int = 0
     first_failure_at: datetime | None = None
     recovered_at: datetime | None = None
+    approver_id: str = ""

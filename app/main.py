@@ -49,7 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Agentic URL Shortener",
-        version="0.2.0",
+        version="0.3.0",
         description="URL shortener domain service with an agentic SDLC orchestrator.",
         lifespan=lifespan,
     )

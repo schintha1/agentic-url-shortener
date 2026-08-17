@@ -1,6 +1,6 @@
 [project]
 name = "agentic-url-shortener"
-version = "0.1.0"
+version = "0.3.0"
 description = "Agentic SDLC orchestrator with a URL shortener domain service"
 readme = "README.md"
 requires-python = ">=3.11"

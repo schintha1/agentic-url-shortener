@@ -10,6 +10,7 @@ class CreateRunRequest(BaseModel):
     inject_failure_node: str | None = None
     inject_failure_count: int = Field(default=1, ge=1, le=10)
     domain_test_target: str | None = Field(default=None, max_length=256)
+    background: bool = False
 
 
 class ApproveRequest(BaseModel):

@@ -50,6 +50,20 @@ HIGH_IMPACT_CAPABILITIES: frozenset[str] = frozenset({"auth", "retention"})
 HIGH_IMPACT_METHODS: tuple[str, ...] = ("DELETE", "PUT")
 
 
+def _text_for_scan(path: Path, text: str) -> str:
+    """Strip unified-diff prefixes so `+@router.get` is not classified as an email."""
+
+    if path.name != "change.patch":
+        return text
+    lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if line[:1] in "+- \\":
+            lines.append(line[1:])
+        else:
+            lines.append(line)
+    return "".join(lines)
+
+
 def check_artifacts(directory: Path, only: list[str] | None = None) -> None:
     """Security pack: scan artifact text for deny rules."""
 
@@ -58,11 +72,15 @@ def check_artifacts(directory: Path, only: list[str] | None = None) -> None:
     candidates = (
         [directory / name for name in only] if only is not None else list(directory.rglob("*"))
     )
+    if only is not None:
+        patch = directory / "change.patch"
+        if patch.exists() and patch not in candidates:
+            candidates.append(patch)
     for path in candidates:
         if not path.is_file():
             continue
         try:
-            text = path.read_text(encoding="utf-8")
+            text = _text_for_scan(path, path.read_text(encoding="utf-8"))
         except UnicodeDecodeError:
             continue
         for rule in CONTENT_RULES:

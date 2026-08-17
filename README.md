@@ -14,6 +14,8 @@ pip install -e ".[dev]"
 uvicorn app.main:app --reload --port 8000
 ```
 
+On Windows: `python -m venv .venv` then `.\.venv\Scripts\activate`.
+
 Shorten and resolve a URL:
 
 ```bash
@@ -33,6 +35,7 @@ RUN_ID=$(curl -s -X POST http://localhost:8000/sdlc/runs \
   | python -c 'import sys,json; print(json.load(sys.stdin)["id"])')
 curl -s http://localhost:8000/sdlc/runs/$RUN_ID          # DAG and node states
 curl -s http://localhost:8000/sdlc/runs/$RUN_ID/trace    # append-only audit
+curl -s http://localhost:8000/sdlc/runs/$RUN_ID/artifacts
 curl -s http://localhost:8000/sdlc/metrics               # reliability metrics
 ```
 
@@ -43,7 +46,7 @@ Human approval (the default; `auto_approve` is for CI):
 ```bash
 curl -s -X POST http://localhost:8000/sdlc/runs/$RUN_ID/approve \
   -H 'Content-Type: application/json' \
-  -d '{"node_id":"release_readiness","note":"reviewed"}'
+  -d '{"node_id":"release_approve","note":"reviewed"}'
 ```
 
 All three required scenarios, in process, no server needed:
@@ -88,9 +91,9 @@ The graph for a brownfield requirement naming two capabilities:
 
 ```mermaid
 flowchart LR
-  understand --> decompose
-  decompose --> impact_analysis
-  impact_analysis --> design
+  understand --> impact_analysis
+  impact_analysis --> decompose
+  decompose --> design
   design --> implement_rate_limit
   design --> implement_analytics
   implement_rate_limit --> test
@@ -100,21 +103,23 @@ flowchart LR
   test --> document
   security_review --> document
   static_analysis --> document
-  document --> release_readiness
+  document --> release_prepare
+  release_prepare --> release_approve
 ```
 
 ## Orchestration model
 
 - **Requirement analysis** ([`requirements.py`](app/orchestrator/requirements.py)) normalises free text into named capabilities, ambiguities, and acceptance criteria.
-- **Codebase reasoning** ([`codebase.py`](app/orchestrator/codebase.py)) parses the source tree with the stdlib `ast` module to find real endpoints, tables, and modules. Add a route and the impact report changes; nothing is hardcoded.
-- **Planner** ([`planner.py`](app/orchestrator/planner.py)) is a pure, cycle-checked function of the scenario *and* the requirement. Capabilities fan out into parallel `implement_*` nodes that join at `test`.
+- **Codebase reasoning** ([`codebase.py`](app/orchestrator/codebase.py)) parses the source tree with the stdlib `ast` module. `scan()` covers `app/`; `impacted_by` keeps only `app/shortener/` so control-plane auth is not treated as the shortener.
+- **Planner** ([`planner.py`](app/orchestrator/planner.py)) is a pure, cycle-checked function of the scenario *and* the requirement. Capabilities fan out into parallel `implement_*` nodes that join at `test`. Brownfield runs `impact_analysis` before `decompose` so task files come from the scan. Ambiguous runs gate on `confirm_scope` after the brief exists; release gates on `release_approve` after `release_prepare` has written the checklist.
 - **Context bus** ([`context.py`](app/orchestrator/context.py)) is the only channel between stages, and it enforces the graph: a node may read an artifact only if it declared a dependency on the node producing it.
+- **Isolated workspace.** Each run copies `app/` and `tests/` into `runs/{id}/workspace`. Adapters patch that copy; the live tree is never written.
 - **Entry and exit gates.** Entry is the dependency and autonomy check. Exit asserts every artifact in `produces` exists and validates against its registered schema, then runs the policy scan. A stage that writes nothing fails.
-- **Policy packs** ([`policy.py`](app/orchestrator/policy.py)): `security` (secrets, private keys, `eval`, PII), `compliance` (release evidence must exist), `change_control` (a change to auth or retention, or a destructive endpoint, withdraws auto-approval).
-- **Reliability.** Bounded retries (2 on `implement`/`test`), rollback from an artifact snapshot, cooperative safe-stop, and real fallback: the optional `static_analysis` gate degrades a run instead of blocking it.
-- **Re-planning.** Each node records an `input_hash`. `POST /sdlc/runs/{id}/amend` folds a revised requirement in, adds and removes nodes, and invalidates anything whose inputs changed plus its descendants — while the audit log keeps the original history.
-- **Concurrency.** Run writes carry a version and an `flock`; a stale write is refused with `409 run_conflict` instead of silently winning.
-- **Observability.** Append-only `audit.jsonl`, atomic `run.json` writes, JSON logs with a request id, and metrics with rates and per-incident MTTR.
+- **Policy packs** ([`policy.py`](app/orchestrator/policy.py)): `security` (secrets, private keys, `eval`, PII), `compliance` (release evidence must exist), `change_control` (a change to auth or retention, or a destructive endpoint, withdraws auto-approval). Blocking security findings require a `waiver` on approve.
+- **Reliability.** Bounded retries (2 on `implement`/`test`), rollback of workspace plus artifacts from a once-per-batch snapshot, cooperative safe-stop (including `background` creates), and real fallback: the optional `static_analysis` gate degrades a run instead of blocking it.
+- **Re-planning.** Each node records an `input_hash` of its spec, assumptions, and upstream artifacts (`understand` also hashes the requirement). `POST /sdlc/runs/{id}/amend` folds a revised requirement in, adds and removes nodes, and keeps sibling `implement_*` nodes whose capability remains — while the audit log keeps the original history.
+- **Concurrency.** Run writes carry a version, a per-run thread lock, and an OS file lock (`fcntl` or `msvcrt`); a stale write is refused with `409 run_conflict` instead of silently winning.
+- **Observability.** Append-only `audit.jsonl` with a `seq`/`prev_hash` chain, atomic `run.json` writes, JSON logs with a request id, and metrics with rates and per-incident MTTR. Approve/reject/stop record `X-Approver-Id` when present.
 
 Node states: `pending | running | gate_wait | succeeded | failed | retrying | rolled_back | stopped`.
 
@@ -122,11 +127,11 @@ Node states: `pending | running | gate_wait | succeeded | failed | retrying | ro
 
 | Scenario | Requirement | What it demonstrates |
 |---|---|---|
-| Greenfield | Build a URL shortener with core APIs | Capability-driven fan-out, parallel join, human release gate |
-| Brownfield | Add analytics and rate limiting | `impact_analysis` naming real modules, endpoints, and tables from the AST |
-| Ambiguous | Make it enterprise-ready | `understand` gates for a human; approval carries assumptions; additive re-plan |
+| Greenfield | Add CSV export of click analytics | New feature on the existing service: adapter writes a CSV route in the isolated workspace and a non-empty `change.patch` |
+| Brownfield | Add in-process caching to URL metadata reads | `impact_analysis` before `decompose`; caching adapter; live `app/shortener` is unchanged |
+| Ambiguous | Make it enterprise-ready | `confirm_scope` after the brief exists; `{auth: api_key, retention_days: 30}` adds `implement_auth` / `implement_retention`; AUTH adapter patches the workspace |
 
-Scope honesty: the shortener is already implemented, so the prototype is always runnable. The orchestrator does the work being evaluated — it analyses the requirement, reasons over the real codebase, runs the real test suite, applies policy, and gates the release. The `implement_*` stages produce an implementation report mapping capabilities to the modules that host them; they do not generate code. That is a deliberate choice, argued in [the design doc](docs/DESIGN.md#7-alternatives-and-trade-offs).
+Scope honesty: the shortener is already implemented, so the prototype is always runnable. Greenfield here means **a new capability on that service**, not a from-scratch seed. `implement_*` applies a deterministic adapter when one exists (export, caching, auth), records `already_present` when AST impact finds the capability at medium/high confidence in `app/shortener/`, and **fails closed** otherwise. `document.md` lists capabilities as **changed** vs **validated existing**; it never says "delivered" unless files changed.
 
 ## URL shortener
 
@@ -152,6 +157,7 @@ Copy [`.env.example`](.env.example) to `.env` to override. Defaults run without 
 | `SDLC_API_KEY` | unset | **Set this in any deployment.** When set, every `/sdlc` route requires `X-API-Key` |
 | `CLICK_RETENTION_DAYS` | `30` | Window used by the click purge |
 | `DOMAIN_TEST_TARGET` | `tests/test_shortener.py` | Suite the orchestrator's `test` stage executes |
+| `ALLOW_FAILURE_INJECTION` | `false` | Test-only: allow `inject_failure_node` on create-run |
 | `LOG_LEVEL` | `INFO` | Log threshold; output is JSON on stderr |
 
 ## Testing
@@ -161,7 +167,7 @@ ruff check app tests
 pytest -q
 ```
 
-139 tests. Both commands run in CI on every push across Python 3.11 and 3.12, along with a job that executes all three scenarios with and without the control plane secured.
+168 tests. Both commands run in CI on every push across Python 3.11 and 3.12, along with a job that executes all three scenarios with and without the control plane secured.
 
 The suite deliberately targets the properties that are easy to fake:
 
@@ -196,11 +202,11 @@ The brief asks for AI-assisted work with engineering judgment, so here is the ho
 Known and deliberate, with the reasoning in [the design doc](docs/DESIGN.md#11-limitations-and-known-gaps).
 
 - Stage agents are deterministic rather than LLM-backed; the adapter boundary is `run_stage(ctx)`
-- `implement_*` reports the modules a change targets; it does not write code
+- Adapters cover export, caching, and auth; other capabilities validate in place or fail closed
 - SQLite serialises writes; models are Postgres-ready but there are no migrations
 - The rate limiter is per process, so a fleet needs a shared counter
 - Metrics are a cached rollup over a directory scan, not a time-series store
-- Auth on the control plane is a single shared key, not per-user identity
+- Auth on the control plane is a shared key plus optional `X-Approver-Id`, not per-user SSO
 
 ## Out of scope
 
@@ -232,3 +238,5 @@ Java port, Postgres and Alembic, Docker, Kubernetes, live LLM agents, SSO, multi
 - P5: input hashing with downstream invalidation, amend endpoint, honest metrics
 - P6: reserved aliases, deletion and retention, limiter eviction, JSON logging
 - P7: CI, dependency-free demo, documentation refresh
+- P8: isolated workspaces, implement adapters, evidence-before-HITL, governance P1
+- P9: shortener-scoped impact, impact-before-decompose, AUTH adapter, run summary

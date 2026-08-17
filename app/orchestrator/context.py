@@ -41,7 +41,7 @@ class StageContext:
     @property
     def analysis(self) -> RequirementAnalysis:
         if self._analysis is None:
-            self._analysis = analyze(self.run.requirement)
+            self._analysis = analyze(self.run.requirement, self.run.assumptions)
         return self._analysis
 
     @property

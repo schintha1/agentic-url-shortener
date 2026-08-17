@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import threading
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, desc, func, select
@@ -15,6 +16,14 @@ from app.shortener.validation import assert_alias_available, assert_safe_url
 MAX_COLLISION_RETRIES = 5
 HEADER_MAX = 512
 logger = logging.getLogger(__name__)
+_IDEMPOTENCY_LOCKS: dict[str, threading.Lock] = {}
+_IDEMPOTENCY_GUARD = threading.Lock()
+
+
+def idempotency_lock(key: str) -> threading.Lock:
+    normalised = key[:128]
+    with _IDEMPOTENCY_GUARD:
+        return _IDEMPOTENCY_LOCKS.setdefault(normalised, threading.Lock())
 
 
 def utcnow() -> datetime:
@@ -173,7 +182,7 @@ def hash_body(payload: dict[str, object]) -> str:
 
 
 def lookup_idempotency(session: Session, key: str, body_hash: str) -> str | None:
-    record = session.get(IdempotencyRecord, key)
+    record = session.get(IdempotencyRecord, key[:128])
     if record is None:
         return None
     if record.body_hash != body_hash:

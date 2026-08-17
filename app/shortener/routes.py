@@ -50,27 +50,34 @@ def shorten(
         )
     payload = body.model_dump(mode="json")
     body_hash = service.hash_body(payload)
-    if idempotency_key:
-        cached = service.lookup_idempotency(session, idempotency_key, body_hash)
-        if cached is not None:
-            return ShortenResponse.model_validate_json(cached)
-    record = service.create_short_url(
-        session,
-        original_url=str(body.url),
-        base_url=settings.base_url,
-        allow_private=settings.allow_private_targets,
-        custom_alias=body.custom_alias,
-        ttl_seconds=body.ttl_seconds,
-    )
-    response = ShortenResponse(
-        code=record.code,
-        short_url=service.short_url_for(settings.base_url, record.code),
-        original_url=record.original_url,
-        expires_at=record.expires_at,
-    )
-    if idempotency_key:
-        service.store_idempotency(session, idempotency_key, body_hash, response.model_dump_json())
-    return response
+    lock = service.idempotency_lock(idempotency_key) if idempotency_key else None
+    if lock is not None:
+        lock.acquire()
+    try:
+        if idempotency_key:
+            cached = service.lookup_idempotency(session, idempotency_key, body_hash)
+            if cached is not None:
+                return ShortenResponse.model_validate_json(cached)
+        record = service.create_short_url(
+            session,
+            original_url=str(body.url),
+            base_url=settings.base_url,
+            allow_private=settings.allow_private_targets,
+            custom_alias=body.custom_alias,
+            ttl_seconds=body.ttl_seconds,
+        )
+        response = ShortenResponse(
+            code=record.code,
+            short_url=service.short_url_for(settings.base_url, record.code),
+            original_url=record.original_url,
+            expires_at=record.expires_at,
+        )
+        if idempotency_key:
+            service.store_idempotency(session, idempotency_key, body_hash, response.model_dump_json())
+        return response
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 @router.get("/v1/urls/{code}", response_model=UrlMetadata, summary="Get short URL metadata")
