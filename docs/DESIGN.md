@@ -163,8 +163,10 @@ flowchart LR
   design --> implement
   implement --> test
   implement --> security_review
+  implement --> static_analysis
   test --> document
   security_review --> document
+  static_analysis --> document
   document --> release_prepare
   release_prepare --> release_approve
 ```
@@ -287,6 +289,8 @@ runs/{run_id}/
   snapshot/       pre-implement copy of artifacts + workspace
 ```
 
+[`workspace.py`](../app/orchestrator/workspace.py) seeds `workspace/` from `app/` and `tests/` at run start. Adapters patch that copy; `write_unified_diff` writes `artifacts/change.patch` against the seed.
+
 Two integrity properties:
 
 - **Atomic state writes.** `run.json` is written to `run.json.tmp` and then `os.replace`d, which is atomic on POSIX. A crash mid-write cannot leave truncated JSON that fails to parse on reload.
@@ -314,7 +318,7 @@ Two integrity properties:
 | release_approve | checklist + waiver if blocking | `release_approval.json` |
 | apply_assumptions | recorded human decision | `assumptions.json` |
 
-Because each stage consumes upstream output, artifacts vary with the run: `design.md` names the capabilities detected in that requirement and the modules impact analysis found, and `document.md` reports the actual test verdict. Two different requirements cannot produce identical artifacts, and tests assert exactly that.
+Because each stage consumes upstream output, artifacts vary with the run: `design.md` names the capabilities detected in that requirement and the modules impact analysis found, and `document.md` is the per-run engineering summary — rationale, risks, assumptions, limitations, and a pointer to `change.patch` when an adapter declared it — not only a test verdict. Two different requirements cannot produce identical artifacts, and tests assert exactly that.
 
 The `test` stage is not a mock. It runs `python -m pytest <target> -q` as a subprocess in the run workspace, a timeout, no `shell=True`, and output truncated to 8 KB. Adapter-generated tests (`tests/test_export.py`, `tests/test_caching.py`, `tests/test_domain_auth.py`) are included when present. A non-zero exit code raises, which fails the node and — after retries — the run. The target must be a relative path under `tests/`.
 
@@ -578,7 +582,7 @@ Every row names a test. Where the earlier version of this document cited a "cont
 
 ## 10. Testing strategy
 
-162 tests across the two layers, plus `ruff` as a lint gate. Both run in CI on every push across Python 3.11 and 3.12, alongside a job that executes all three scenarios with and without the control plane secured.
+168 tests across the two layers, plus `ruff` as a lint gate. Both run in CI on every push across Python 3.11 and 3.12, alongside a job that executes all three scenarios with and without the control plane secured.
 
 - **Analysis** — capability detection, ambiguity detection, criteria generation.
 - **Codebase reasoning** — endpoint and table discovery against the real tree, and a temporary package proving the report grows when the source grows.
@@ -586,6 +590,7 @@ Every row names a test. Where the earlier version of this document cited a "cont
 - **Domain API** — shorten, redirect, metadata, stats, delete, retention; failure paths 422, 409, 410, 429, and idempotent replay.
 - **Planner** — requirement-driven node sets, fan-out and join shape, optional gates, acyclicity.
 - **Context and artifacts** — transitive readability, refusal of undeclared reads and writes, schema validation at the gate.
+- **Workspace and adapters** — seed isolation, unified diff, export/caching/auth patches that do not touch the live tree (`tests/test_workspace.py`, `tests/test_adapters.py`).
 - **Executor** — completion, parallel join ordering via audit timestamps, gate enforcement, unknown run 404.
 - **Governance** — three policy packs, approve, reject, wrong-state 409, auth matrix, change-control override.
 - **Reliability** — retry recovery, rollback, fallback degradation, safe-stop, resume, and a red domain suite failing the run.
