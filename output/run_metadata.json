@@ -1,0 +1,25 @@
+{
+  "label": "Blond_Hair",
+  "classes": 2,
+  "z_dim": 32,
+  "image_size": 64,
+  "epochs": 80,
+  "steps_per_epoch": 25,
+  "total_steps": 2000,
+  "max_samples": 8000,
+  "per_class": 4000,
+  "balanced": true,
+  "run_eagerly": false,
+  "batch_size": 64,
+  "critic_steps": 3,
+  "gp_weight": 10.0,
+  "wall_time_sec": 1428.5922553539276,
+  "textbook": "Foster, Generative Deep Learning 2e \u2014 Ch.4 Conditional WGAN-GP",
+  "improvements": [
+    "class-balanced Blond_Hair sampling",
+    "in-memory cached tensors",
+    "graph-mode train_step (not eager)",
+    "more steps/epoch than book demo (steps_per_epoch=1)"
+  ],
+  "note": "train_step expands one_hot_labels (batch, 2) to image_one_hot_labels (batch, 64, 64, 2) for the critic."
+}

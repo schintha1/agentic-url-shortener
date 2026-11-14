@@ -1,0 +1,13 @@
+{
+  "label": "Blond_Hair",
+  "classes": 2,
+  "z_dim": 32,
+  "image_size": 64,
+  "epochs": 40,
+  "steps_per_epoch": 5,
+  "max_samples": 8000,
+  "batch_size": 64,
+  "critic_steps": 3,
+  "gp_weight": 10.0,
+  "note": "train_step expands one_hot_labels (batch, 2) to image_one_hot_labels (batch, 64, 64, 2) for the critic."
+}
